@@ -1,0 +1,19 @@
+# 数据集和缓存 (严格禁止上传)
+data/
+*.pt
+*.pth
+*.graphml
+*.npy
+*.csv
+
+# Python 缓存文件
+__pycache__/
+*.pyc
+
+# 虚拟环境
+venv/
+env/
+.env
+
+# 编辑器配置
+.vscode/
