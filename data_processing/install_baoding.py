@@ -17,7 +17,7 @@ def download_raw_map_task(result_container):
     只负责下载和保存最原始的数据，不做任何处理
     """
     try:
-        # 1. 下载 (关键修改：simplify=False)
+        # 1. 下载 (关键修改：simplify=False) 
         # simplify=False: 保留所有节点（包括弯道上的形状点），不合并路段。
         # 这是"最原始"的状态，对应你 Slide 左侧的那种图。
         console.print(f"[dim]正在向 OSM 发送请求 (simplify=False)...[/dim]")
