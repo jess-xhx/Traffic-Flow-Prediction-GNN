@@ -14,5 +14,10 @@ venv/
 env/
 .env
 
+# 拦截所有缓存 json 文件
+data/cache/*.json
+# 或者直接拦截整个缓存文件夹
+data/cache/
+
 # 编辑器配置
 .vscode/
