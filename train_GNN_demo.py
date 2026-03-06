@@ -6,7 +6,7 @@ import numpy as np
 from tqdm import tqdm
 
 # 导入你之前创建的三层模型 (假设你把代码保存在 models/traffic_flow_model.py)
-from models.traffic_flow_model import TrafficFlowPredictor 
+from models.GNN_base_model import TrafficFlowPredictor 
 
 def train():
     # --- 1. 配置参数 ---
