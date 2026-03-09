@@ -4,11 +4,28 @@ import torch.optim as optim
 from torch_geometric.loader import DataLoader
 import numpy as np
 from tqdm import tqdm
+import time
+import random
+import os
 
 # 导入你之前创建的三层模型 (假设你把代码保存在 models/traffic_flow_model.py)
 from models.GNN_base_model import TrafficFlowPredictor 
 
+# 固定随机种子
+seed = 42
+random.seed(seed)
+np.random.seed(seed)
+torch.manual_seed(seed)
+torch.cuda.manual_seed_all(seed)
+torch.backends.cudnn.deterministic = True
+
 def train():
+
+    # 获取当前时间戳
+    timestamp = time.strftime("%Y%m%d_%H%M%S")
+    # 设置保存路径
+    output_file = f"E:/vscode项目文件/Traffic_Flow_Prediction/log/training_losses_{timestamp}.txt"  # 指定路径并使用时间戳
+
     # --- 1. 配置参数 ---
     DATA_PATH = r"E:\vscode项目文件\Traffic_Flow_Prediction\data\processed\mock_dynamic_dataset.pt"
     BATCH_SIZE = 8
@@ -19,8 +36,13 @@ def train():
 
     # --- 2. 加载数据 ---
     print("加载数据集...")
-    dataset = torch.load(DATA_PATH)
-    
+    dataset = torch.load(DATA_PATH, weights_only=False)
+
+    # 计算并设置 num_nodes 属性
+    for data in dataset:
+        num_nodes = data.edge_index.max().item() + 1  # 假设 `edge_index` 的最大值代表节点数
+        data.num_nodes = num_nodes  # 为每个 data 对象设置 num_nodes 属性
+
     # 划分训练集和验证集 (80% 训练, 20% 验证)
     train_size = int(len(dataset) * 0.8)
     train_dataset = dataset[:train_size]
@@ -45,7 +67,11 @@ def train():
     ).to(DEVICE)
     
     criterion = nn.MSELoss() # 回归任务使用均方误差
-    optimizer = optim.Adam(model.parameters(), lr=LEARNING_RATE, weight_decay=1e-4)
+    optimizer = optim.AdamW(model.parameters(), lr=LEARNING_RATE, weight_decay=1e-4)
+
+     # 创建 .txt 文件并写入表头
+    with open(output_file, "w") as f:
+        f.write("Epoch, Train Loss (MSE), Val Loss (MSE)\n")  # 写入表头
 
     # --- 4. 开始训练 ---
     print("开始训练...")
@@ -98,7 +124,11 @@ def train():
         avg_val_loss = val_loss / len(val_dataset)
         print(f"Epoch[{epoch+1}/{EPOCHS}] | Train Loss(MSE): {avg_train_loss:.2f} | Val Loss(MSE): {avg_val_loss:.2f}")
 
-    print("\n✅ 训练全流程跑通！模型基座构建完毕。")
+        # 自动记录每轮损失到 txt 文件
+        with open(output_file, "a") as f:  # 追加模式打开文件
+            f.write(f"{epoch+1}, {avg_train_loss:.2f}, {avg_val_loss:.2f}\n")
+
+    print("\n GNN模型基座构建完毕。")
     # 可以保存模型权重
     torch.save(model.state_dict(), "st_base_model.pth")
 

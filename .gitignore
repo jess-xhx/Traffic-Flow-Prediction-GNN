@@ -4,6 +4,7 @@
 *.graphml
 *.npy
 *.csv
+*.txt
 
 # Python 缓存文件
 __pycache__/
