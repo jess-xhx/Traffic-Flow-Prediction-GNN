@@ -300,7 +300,7 @@ def save_gnn_dataset(x_tensor, edge_index, gdf_edges):
 
     # 2. 定义保存路径 (使用你指定的绝对路径)
     # 使用 r"" 原始字符串避免 Windows 路径反斜杠转义问题
-    save_dir = r"E:\vscode项目文件\Traffic_Flow_Prediction\data\processed"
+    save_dir = r"E:\vscode项目文件\Traffic_Flow_Prediction\2.data_processing\Static_road"
     file_name = "baoding_static_road_gnn_dataset.pt"
     save_path = os.path.join(save_dir, file_name)
 
@@ -324,7 +324,7 @@ if __name__ == "__main__":
     
     # 加载原始路网数据
     print("加载原始路网数据...")
-    G_raw = ox.load_graphml(r"E:\vscode项目文件\Traffic_Flow_Prediction\data\raw\baoding_raw.graphml")
+    G_raw = ox.load_graphml(r"E:\vscode项目文件\Traffic_Flow_Prediction\2.data_processing\Static_road\baoding_raw.graphml")
 
     ### 第一步 ###
     print("\n开始第一步处理...")

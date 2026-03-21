@@ -8,7 +8,7 @@ from rich.progress import Progress, SpinnerColumn, TextColumn, TimeElapsedColumn
 # --- 配置区域 ---
 PLACE_NAME = "Baoding, China"
 # 建议文件名加上 _raw 以示区别
-SAVE_PATH = "./data/processed/baoding_raw.graphml" 
+SAVE_PATH = "./data/2.data_processing/Static_road/baoding_raw.graphml" 
 
 console = Console()
 
