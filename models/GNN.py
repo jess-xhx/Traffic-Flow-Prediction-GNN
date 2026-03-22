@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Optional, Sequence, Tuple
+from typing import Any, Mapping, Optional, Sequence, Tuple
 
 import torch
 import torch.nn as nn
@@ -8,36 +8,27 @@ import torch.nn as nn
 from configs.gnn_config import ModelConfig
 from utils.gnn_utils import Batch, Tensor, prepare_batch, scalar_int
 
-from GNN_1_base import BaseWeeklyBank
-from GNN_2_recent import RecentResidualBank
-from GNN_3_event import EventResidualInjector
+try:
+    from GNN_1_base import BaseWeeklyBank
+    from GNN_2_recent import RecentResidualBank
+    from GNN_3_event import EventResidualInjector
+except ImportError:  # 兼容 package 导入
+    from .GNN_1_base import BaseWeeklyBank
+    from .GNN_2_recent import RecentResidualBank
+    from .GNN_3_event import EventResidualInjector
 
 
 class TrafficGNNSystem(nn.Module):
     """
-    只保留总模型封装：
-      模块1: BaseWeeklyBank
-      模块2: RecentResidualBank
-      模块3: EventResidualInjector
-
-    约定 batch 字段：
-      x_static         [N, F_s]
-      profile_feat     [N, 7, 288, F_p]
-      edge_index       [2, E]
-      recent_speed_seq [N, K, 1]                 (阶段2/3/联合需要)
-      event_vector     [N, F_e]                  (阶段3/联合需要)
-      target_weekday   标量 int / Tensor         (阶段3/联合需要)
-      target_slot      标量 int / Tensor         (阶段3/联合需要)
-
-    说明：
-      - 模块3只对“单个目标时刻”做即时事件修正。
-      - 多 horizon 预测时，可循环多次调用 predict_one_horizon / predict_multi_horizon。
+    总模型：
+      模块1：BaseWeeklyBank
+      模块2：RecentResidualBank
+      模块3：EventResidualInjector
     """
 
     def __init__(self, cfg: ModelConfig):
         super().__init__()
         self.cfg = cfg
-
         self.base = BaseWeeklyBank(
             static_dim=cfg.static_dim,
             profile_dim=cfg.profile_dim,
@@ -47,14 +38,12 @@ class TrafficGNNSystem(nn.Module):
             bank_hidden_dim=cfg.bank_hidden_dim,
             use_speed_head=True,
         )
-
         self.recent = RecentResidualBank(
             bank_hidden_dim=cfg.bank_hidden_dim,
             recent_hidden_dim=cfg.recent_hidden_dim,
             calendar_hidden_dim=cfg.calendar_hidden_dim,
             use_speed_head=True,
         )
-
         self.event = EventResidualInjector(
             hidden_dim=cfg.bank_hidden_dim,
             event_dim=cfg.event_dim,
@@ -217,10 +206,6 @@ class TrafficGNNSystem(nn.Module):
         target_pairs: Sequence[Tuple[int, int]],
         event_vectors: Optional[Sequence[Optional[Tensor]]] = None,
     ) -> Tensor:
-        """
-        返回 [H, N]。
-        event_vectors 允许为 None；若给出，则长度应与 target_pairs 相同。
-        """
         self.eval()
         recent_out = self.forward_recent(x_static, profile_feat, recent_speed_seq, edge_index)
         H_adapted_bank = recent_out['H_adapted_bank']

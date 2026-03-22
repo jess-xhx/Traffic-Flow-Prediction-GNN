@@ -1,9 +1,17 @@
 from __future__ import annotations
 
+import json
+import random
+from pathlib import Path
 from typing import Any, Mapping, Union
 
 import torch
 import torch.nn as nn
+
+try:
+    import numpy as np
+except Exception:  # pragma: no cover
+    np = None
 
 
 Tensor = torch.Tensor
@@ -108,3 +116,49 @@ def unfreeze_module(module: nn.Module) -> None:
     module.train()
     for p in module.parameters():
         p.requires_grad = True
+
+
+
+def set_seed(seed: int, deterministic: bool = False) -> None:
+    random.seed(seed)
+    if np is not None:
+        np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+    if deterministic:
+        torch.backends.cudnn.deterministic = True
+        torch.backends.cudnn.benchmark = False
+
+
+
+def ensure_dir(path: str | Path) -> Path:
+    path = Path(path)
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+
+def save_json(data: Any, path: str | Path) -> None:
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open('w', encoding='utf-8') as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+
+
+__all__ = [
+    'Tensor',
+    'Batch',
+    'to_device',
+    'maybe_squeeze_graph_batch',
+    'prepare_batch',
+    'scalar_int',
+    'ensure_bank_layout',
+    'ensure_node_vector_layout',
+    'masked_mae',
+    'freeze_module',
+    'unfreeze_module',
+    'set_seed',
+    'ensure_dir',
+    'save_json',
+]

@@ -1,0 +1,86 @@
+# 运行方式:
+# python train.py --config configs/gnn_train.yaml
+#
+# 数据格式支持:
+# 1) data.root_dir 指向目录，目录下存在 train.pt / val.pt / test.pt
+# 2) data.root_dir 指向目录，目录下存在 train/ val/ test/ 三个子目录，每个子目录内是若干 .pt 样本文件
+# 3) 直接分别指定 data.train_path / data.val_path / data.test_path
+#
+# 每个样本通常需要包含这些字段:
+# x_static, profile_feat, edge_index,
+# recent_speed_seq, target_weekday, target_slot, event_vector,
+# y_base_bank, y_future_bank, y_target_speed
+# 可选 mask: base_mask, future_mask, event_mask
+
+model:
+  static_dim: 16
+  profile_dim: 8
+  event_dim: 6
+  static_hidden_dim: 32
+  calendar_hidden_dim: 32
+  profile_hidden_dim: 32
+  bank_hidden_dim: 64
+  recent_hidden_dim: 32
+
+data:
+  root_dir: ./data/traffic_gnn
+  train_path: null
+  val_path: null
+  test_path: null
+  file_pattern: '*.pt'
+  batch_size: 1
+  num_workers: 0
+  pin_memory: false
+  persistent_workers: false
+  shuffle_train: true
+  drop_last: false
+
+stage1:
+  epochs: 10
+  lr: 0.001
+  weight_decay: 0.00001
+  grad_clip: 5.0
+  log_every: 1
+
+stage2:
+  epochs: 10
+  lr: 0.001
+  weight_decay: 0.00001
+  grad_clip: 5.0
+  log_every: 1
+
+stage3:
+  epochs: 10
+  lr: 0.001
+  weight_decay: 0.00001
+  grad_clip: 5.0
+  log_every: 1
+
+joint:
+  epochs: 5
+  lr_base: 0.0001
+  lr_recent: 0.0003
+  lr_event: 0.0005
+  weight_decay: 0.00001
+  alpha_base: 0.2
+  beta_recent: 0.3
+  gamma_event: 1.0
+  lambda_recent_reg: 0.0001
+  lambda_event_reg: 0.0001
+  grad_clip: 5.0
+  log_every: 1
+
+runtime:
+  seed: 42
+  deterministic: false
+  device: auto
+  output_dir: ./log
+  experiment_name: traffic_gnn_exp01
+  resume_checkpoint: null
+  save_every_epoch: true
+  monitor: val_loss
+  monitor_mode: min
+  use_stage1: true
+  use_stage2: true
+  use_stage3: true
+  use_joint: true
