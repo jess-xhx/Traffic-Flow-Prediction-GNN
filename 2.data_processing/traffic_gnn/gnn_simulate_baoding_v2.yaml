@@ -1,5 +1,7 @@
 seed: 42
-output_dir: ./2.data_processing/traffic_gnn
+
+# 输出到当前脚本同级目录下
+output_dir: ./mock_traffic_output
 
 graph_bundle_path: ../Static_road/baoding_static_road_gnn_dataset.pt
 x_static_key: x
@@ -19,3 +21,8 @@ observation_noise_std: 1.5
 bank_noise_std: 0.8
 future_noise_std: 1.2
 event_prob: 0.15
+
+# 新增：进度条 + 分片保存，避免一次性堆满内存
+show_progress: true
+save_chunk_size: 4
+storage_dtype: float32

@@ -1,19 +1,15 @@
 # 运行方式:
-# python train.py --config configs/gnn_train.yaml
+# python train_sharded_compatible.py --config configs/gnn_train_sharded.yaml
+# 如果你已经把 train_sharded_compatible.py 覆盖成 train.py，也可以：
+# python train.py --config configs/gnn_train_sharded.yaml
 #
-# 数据格式支持:
-# 1) data.root_dir 指向目录，目录下存在 train.pt / val.pt / test.pt
-# 2) data.root_dir 指向目录，目录下存在 train/ val/ test/ 三个子目录，每个子目录内是若干 .pt 样本文件
-# 3) 直接分别指定 data.train_path / data.val_path / data.test_path
-#
-# 每个样本通常需要包含这些字段:
-# x_static, profile_feat, edge_index,
-# recent_speed_seq, target_weekday, target_slot, event_vector,
-# y_base_bank, y_future_bank, y_target_speed
-# 可选 mask: base_mask, future_mask, event_mask
+# 说明:
+# - 该配置适配 mock_traffic_output/ 这种新目录结构
+# - 下面的 data.root_dir 按“配置文件放在 configs/ 目录下”来写
+# - 如果你的 yaml 不在 configs/ 目录，而是在项目根目录，请把 ../mock_traffic_output 改成 ./mock_traffic_output
 
 model:
-  static_dim: 16
+  static_dim: 17
   profile_dim: 8
   event_dim: 6
   static_hidden_dim: 32
@@ -23,7 +19,7 @@ model:
   recent_hidden_dim: 32
 
 data:
-  root_dir: ./data/traffic_gnn
+  root_dir: ../2.data_processing/traffic_gnn/mock_traffic_output
   train_path: null
   val_path: null
   test_path: null

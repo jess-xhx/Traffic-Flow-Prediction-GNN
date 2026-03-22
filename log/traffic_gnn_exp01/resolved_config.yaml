@@ -1,0 +1,66 @@
+model:
+  static_dim: 17
+  profile_dim: 8
+  event_dim: 6
+  static_hidden_dim: 32
+  calendar_hidden_dim: 32
+  profile_hidden_dim: 32
+  bank_hidden_dim: 64
+  recent_hidden_dim: 32
+data:
+  root_dir: ../2.data_processing/traffic_gnn/mock_traffic_output
+  train_path: null
+  val_path: null
+  test_path: null
+  file_pattern: '*.pt'
+  batch_size: 1
+  num_workers: 0
+  pin_memory: false
+  persistent_workers: false
+  shuffle_train: true
+  drop_last: false
+stage1:
+  epochs: 10
+  lr: 0.001
+  weight_decay: 1.0e-05
+  grad_clip: 5.0
+  log_every: 1
+stage2:
+  epochs: 10
+  lr: 0.001
+  weight_decay: 1.0e-05
+  grad_clip: 5.0
+  log_every: 1
+stage3:
+  epochs: 10
+  lr: 0.001
+  weight_decay: 1.0e-05
+  grad_clip: 5.0
+  log_every: 1
+joint:
+  epochs: 5
+  lr_base: 0.0001
+  lr_recent: 0.0003
+  lr_event: 0.0005
+  weight_decay: 1.0e-05
+  alpha_base: 0.2
+  beta_recent: 0.3
+  gamma_event: 1.0
+  lambda_recent_reg: 0.0001
+  lambda_event_reg: 0.0001
+  grad_clip: 5.0
+  log_every: 1
+runtime:
+  seed: 42
+  deterministic: false
+  device: auto
+  output_dir: ./log
+  experiment_name: traffic_gnn_exp01
+  resume_checkpoint: null
+  save_every_epoch: true
+  monitor: val_loss
+  monitor_mode: min
+  use_stage1: true
+  use_stage2: true
+  use_stage3: true
+  use_joint: true

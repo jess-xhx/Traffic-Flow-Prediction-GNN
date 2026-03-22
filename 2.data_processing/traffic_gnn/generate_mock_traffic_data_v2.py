@@ -1,13 +1,13 @@
-
 from __future__ import annotations
 
 import argparse
+import gc
 import json
 import math
 import pickle
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Iterable, Optional
 
 import numpy as np
 import torch
@@ -16,6 +16,11 @@ try:
     import yaml
 except Exception:
     yaml = None
+
+try:
+    from tqdm.auto import tqdm
+except Exception:
+    tqdm = None
 
 
 # -----------------------------
@@ -29,7 +34,8 @@ class SimConfig:
     x_static_key: str = "x_static"
     edge_index_key: str = "edge_index"
 
-    output_dir: str = "./traffic_gnn"
+    # 默认输出到当前脚本同级目录下
+    output_dir: str = "./mock_traffic_output"
 
     num_train: int = 256
     num_val: int = 64
@@ -46,6 +52,11 @@ class SimConfig:
     future_noise_std: float = 1.2
     event_prob: float = 0.08
     seed: int = 42
+
+    # 新增：防卡死/爆内存相关配置
+    show_progress: bool = True
+    save_chunk_size: int = 8
+    storage_dtype: str = "float32"  # 可选: float32 / float16
 
 
 # -----------------------------
@@ -91,13 +102,11 @@ def _to_tensor(obj: Any, key: Optional[str] = None) -> torch.Tensor:
         if len(obj) == 1:
             return _to_tensor(next(iter(obj.values())), None)
 
-    # 兼容 torch_geometric.data.Data / 自定义对象属性访问
     if key is not None and hasattr(obj, key):
         return _to_tensor(getattr(obj, key), None)
 
-    # 对常见 PyG Data 对象做一个兜底提示
-    if key is None and hasattr(obj, 'x') and isinstance(getattr(obj, 'x'), torch.Tensor):
-        return _to_tensor(getattr(obj, 'x'), None)
+    if key is None and hasattr(obj, "x") and isinstance(getattr(obj, "x"), torch.Tensor):
+        return _to_tensor(getattr(obj, "x"), None)
 
     raise TypeError(f"无法把对象转换成 Tensor。key={key}, type={type(obj)}")
 
@@ -122,8 +131,14 @@ def load_graph_inputs(cfg: SimConfig, base_dir: Path) -> tuple[torch.Tensor, tor
             raise FileNotFoundError("请提供有效的 x_static_path")
         if e_path is None or not e_path.exists():
             raise FileNotFoundError("请提供有效的 edge_index_path")
-        x_static = _to_tensor(_load_any(x_path), cfg.x_static_key if x_path.suffix.lower() in {".pt", ".pth", ".npz"} else None).float()
-        edge_index = _to_tensor(_load_any(e_path), cfg.edge_index_key if e_path.suffix.lower() in {".pt", ".pth", ".npz"} else None).long()
+        x_static = _to_tensor(
+            _load_any(x_path),
+            cfg.x_static_key if x_path.suffix.lower() in {".pt", ".pth", ".npz"} else None,
+        ).float()
+        edge_index = _to_tensor(
+            _load_any(e_path),
+            cfg.edge_index_key if e_path.suffix.lower() in {".pt", ".pth", ".npz"} else None,
+        ).long()
 
     if x_static.dim() != 2:
         raise ValueError(f"x_static 应为 [N, F_s]，实际 {tuple(x_static.shape)}")
@@ -154,9 +169,6 @@ def compute_degree(edge_index: torch.Tensor, num_nodes: int) -> torch.Tensor:
 
 
 def neighbor_mean(x: torch.Tensor, edge_index: torch.Tensor, num_nodes: int) -> torch.Tensor:
-    """
-    x: [N] or [N, D]
-    """
     if x.dim() == 1:
         x = x.unsqueeze(-1)
         squeeze_back = True
@@ -191,6 +203,36 @@ def ensure_edge_index_in_range(edge_index: torch.Tensor, num_nodes: int) -> torc
     return edge_index.long()
 
 
+def get_storage_dtype(dtype_name: str) -> torch.dtype:
+    mapping = {
+        "float16": torch.float16,
+        "float32": torch.float32,
+    }
+    if dtype_name not in mapping:
+        raise ValueError(f"storage_dtype 仅支持 {list(mapping.keys())}，当前为 {dtype_name}")
+    return mapping[dtype_name]
+
+
+def progress(iterable: Iterable, total: Optional[int], desc: str, enable: bool = True):
+    if enable and tqdm is not None:
+        return tqdm(iterable, total=total, desc=desc, dynamic_ncols=True, leave=True)
+    return iterable
+
+
+def cast_tensor_tree(obj: Any, target_dtype: torch.dtype) -> Any:
+    if isinstance(obj, torch.Tensor):
+        if obj.dtype.is_floating_point:
+            return obj.to(target_dtype)
+        return obj
+    if isinstance(obj, dict):
+        return {k: cast_tensor_tree(v, target_dtype) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [cast_tensor_tree(v, target_dtype) for v in obj]
+    if isinstance(obj, tuple):
+        return tuple(cast_tensor_tree(v, target_dtype) for v in obj)
+    return obj
+
+
 # -----------------------------
 # 生成长期 bank / profile
 # -----------------------------
@@ -210,7 +252,7 @@ def build_base_bank_and_profile(
 
     gen = torch.Generator().manual_seed(cfg.seed)
     proj_w = torch.randn(static_dim, 3, generator=gen) / math.sqrt(max(static_dim, 1))
-    proj = x_norm @ proj_w  # [N, 3]
+    proj = x_norm @ proj_w
 
     degree = compute_degree(edge_index, num_nodes)
     degree_norm = minmax_01(degree)
@@ -219,7 +261,6 @@ def build_base_bank_and_profile(
     road_score = smooth_signal(road_score, edge_index, num_steps=2, alpha=0.7)
     road_score_norm = minmax_01(road_score)
 
-    # 每个节点的“自由流速度”和“拥堵敏感度”
     free_flow = cfg.base_speed_min + (cfg.base_speed_max - cfg.base_speed_min) * (0.25 + 0.75 * road_score_norm)
     congestion_amp = 0.14 + 0.20 * (1.0 - road_score_norm)
     volatility = 0.02 + 0.05 * minmax_01(torch.abs(proj[:, 2]))
@@ -232,7 +273,6 @@ def build_base_bank_and_profile(
     midday_bump = torch.exp(-0.5 * ((hours - 13.0) / 2.5) ** 2)
     night_relief = torch.exp(-0.5 * ((hours - 3.0) / 2.8) ** 2)
 
-    # 周几节奏
     weekday_factors = torch.tensor([1.10, 1.05, 1.00, 1.00, 1.08, 0.72, 0.66], dtype=torch.float32)
     weekend_flags = torch.tensor([0, 0, 0, 0, 0, 1, 1], dtype=torch.float32)
 
@@ -241,7 +281,6 @@ def build_base_bank_and_profile(
         day_factor = weekday_factors[w]
         weekend = weekend_flags[w]
 
-        # 拥堵曲线：工作日双峰更明显，周末更平坦
         congestion_curve = (
             0.85 * morning_peak * (1.0 - 0.55 * weekend)
             + 0.75 * evening_peak * (1.0 - 0.40 * weekend)
@@ -250,22 +289,18 @@ def build_base_bank_and_profile(
         )
         congestion_curve = congestion_curve.clamp_min(0.0)
 
-        # [288, N]
         speed_day = free_flow.unsqueeze(0) * (
             1.0 - day_factor * congestion_curve.unsqueeze(1) * congestion_amp.unsqueeze(0)
         )
 
-        # 周末整体略快一点，但娱乐热点节点周末中午可能更慢
         weekend_bonus = (1.2 * weekend - 0.4 * (1.0 - weekend)) * (0.5 - road_score_norm)
         speed_day = speed_day + weekend_bonus.unsqueeze(0)
 
-        # 微小平滑噪声
         noise = torch.randn((288, num_nodes), generator=gen) * cfg.bank_noise_std
         noise = 0.5 * noise + 0.5 * noise.roll(shifts=1, dims=0)
         speed_day = (speed_day + noise).clamp_min(5.0)
         base_bank[w] = speed_day
 
-    # 构造 profile_feat [N, 7, 288, F_p]
     weekday_ids = torch.arange(7, dtype=torch.float32).view(1, 7, 1).expand(1, 7, 288)
     slot_ids = torch.arange(288, dtype=torch.float32).view(1, 1, 288).expand(1, 7, 288)
     weekday_angle = 2 * math.pi * weekday_ids / 7.0
@@ -313,10 +348,6 @@ def _pair_from_week_index(index: int) -> tuple[int, int]:
 
 
 def _gather_week_series(bank: torch.Tensor, start_index: int, length: int) -> torch.Tensor:
-    """
-    bank: [7, 288, N]
-    return: [length, N]
-    """
     outs = []
     for k in range(length):
         w, s = _pair_from_week_index(start_index + k)
@@ -336,15 +367,12 @@ def build_sample(
     num_nodes = x_static.shape[0]
     gen = torch.Generator().manual_seed(cfg.seed + 1000 + sample_idx)
 
-    free_flow = aux["free_flow"]
     degree_norm = aux["degree_norm"]
     road_score_norm = aux["road_score_norm"]
 
-    # 随机选一个“当前目标时刻”
     target_weekday = int(torch.randint(0, 7, (1,), generator=gen).item())
     target_slot = int(torch.randint(0, 288, (1,), generator=gen).item())
 
-    # 慢漂移：模拟节前节后、最近几天整体偏快/偏慢
     node_drift = torch.randn(num_nodes, generator=gen) * (1.5 + 2.5 * (1.0 - road_score_norm))
     node_drift = smooth_signal(node_drift, edge_index, num_steps=2, alpha=0.72)
 
@@ -367,24 +395,20 @@ def build_sample(
     future_noise = torch.randn(y_base_bank.shape, generator=gen) * cfg.future_noise_std
     y_future_bank = (y_base_bank + delta_recent_bank + future_noise).clamp_min(5.0)
 
-    # 近期序列：取目标时刻之前 K 个时间片
     target_index = _week_index_from_pair(target_weekday, target_slot)
-    hist = _gather_week_series(y_future_bank, target_index - cfg.recent_len, cfg.recent_len)  # [K, N]
-    hist = hist.transpose(0, 1).contiguous()  # [N, K]
+    hist = _gather_week_series(y_future_bank, target_index - cfg.recent_len, cfg.recent_len)
+    hist = hist.transpose(0, 1).contiguous()
     obs_noise = torch.randn((num_nodes, cfg.recent_len), generator=gen) * cfg.observation_noise_std
-    recent_speed_seq = (hist + obs_noise).unsqueeze(-1).float()  # [N, K, 1]
+    recent_speed_seq = (hist + obs_noise).unsqueeze(-1).float()
 
-    # 事件模拟：少量节点触发，沿图轻微扩散
     event_dim = cfg.event_dim
     event_vector = torch.zeros((num_nodes, event_dim), dtype=torch.float32)
 
-    # 4 类主事件
     accident = (torch.rand(num_nodes, generator=gen) < cfg.event_prob).float() * torch.rand(num_nodes, generator=gen)
     weather = (torch.rand(num_nodes, generator=gen) < cfg.event_prob * 0.7).float() * torch.rand(num_nodes, generator=gen)
     construction = (torch.rand(num_nodes, generator=gen) < cfg.event_prob * 0.5).float() * torch.rand(num_nodes, generator=gen)
     closure = (torch.rand(num_nodes, generator=gen) < cfg.event_prob * 0.25).float() * torch.rand(num_nodes, generator=gen)
 
-    # 图扩散后的影响范围
     spill_seed = (accident + 0.7 * weather + 0.9 * construction + 1.2 * closure).clamp(0.0, 1.5)
     spill = smooth_signal(spill_seed, edge_index, num_steps=3, alpha=0.6)
     spill = minmax_01(spill)
@@ -404,13 +428,11 @@ def build_sample(
     for d in range(min(event_dim, len(event_candidates))):
         event_vector[:, d] = event_candidates[d]
     if event_dim > len(event_candidates):
-        # 额外维度补一些平滑随机扰动
         extra = torch.randn((num_nodes, event_dim - len(event_candidates)), generator=gen) * 0.1
         extra = smooth_signal(extra, edge_index, num_steps=2, alpha=0.7)
         event_vector[:, len(event_candidates):] = extra
 
-    # 单时刻监督：未来bank对应时刻 + 当前事件冲击
-    base_target = y_future_bank[target_weekday, target_slot]  # [N]
+    base_target = y_future_bank[target_weekday, target_slot]
     event_drop = (
         severity * (5.0 + 12.0 * (1.0 - road_score_norm))
         + 4.0 * spill
@@ -419,22 +441,25 @@ def build_sample(
     event_drop = event_drop.clamp_min(0.0)
     y_target_speed = (base_target - event_drop).clamp_min(3.0)
 
+    # 注意：共享量不再在每个样本里重复存一份，避免体积过大
     sample = {
-        "x_static": x_static.clone().float(),
-        "profile_feat": profile_feat.clone().float(),
-        "edge_index": edge_index.clone().long(),
         "recent_speed_seq": recent_speed_seq.float(),
         "target_weekday": torch.tensor(target_weekday, dtype=torch.long),
         "target_slot": torch.tensor(target_slot, dtype=torch.long),
         "event_vector": event_vector.float(),
-        "y_base_bank": y_base_bank.clone().float(),
         "y_future_bank": y_future_bank.float(),
         "y_target_speed": y_target_speed.float(),
-        "base_mask": torch.ones_like(y_base_bank, dtype=torch.float32),
         "future_mask": torch.ones_like(y_future_bank, dtype=torch.float32),
         "event_mask": torch.ones_like(y_target_speed, dtype=torch.float32),
     }
     return sample
+
+
+def flush_chunk(buffer: list[dict[str, torch.Tensor]], split_dir: Path, split: str, shard_idx: int, storage_dtype: torch.dtype) -> str:
+    shard_path = split_dir / f"{split}_{shard_idx:05d}.pt"
+    payload = cast_tensor_tree(buffer, storage_dtype)
+    torch.save(payload, shard_path)
+    return shard_path.name
 
 
 def generate_dataset(cfg: SimConfig, base_dir: Path) -> dict[str, Any]:
@@ -455,6 +480,8 @@ def generate_dataset(cfg: SimConfig, base_dir: Path) -> dict[str, Any]:
     assert out_root is not None
     out_root.mkdir(parents=True, exist_ok=True)
 
+    storage_dtype = get_storage_dtype(cfg.storage_dtype)
+
     meta = {
         "num_nodes": int(x_static.shape[0]),
         "static_dim": int(x_static.shape[1]),
@@ -464,11 +491,37 @@ def generate_dataset(cfg: SimConfig, base_dir: Path) -> dict[str, Any]:
         "event_dim": cfg.event_dim,
         "splits": split_sizes,
         "seed": cfg.seed,
+        "save_chunk_size": cfg.save_chunk_size,
+        "storage_dtype": cfg.storage_dtype,
+        "format": "sharded_pt_v2",
+    }
+
+    shared_reference = {
+        "x_static": x_static,
+        "edge_index": edge_index,
+        "y_base_bank": y_base_bank,
+        "profile_feat": profile_feat,
+    }
+    torch.save(cast_tensor_tree(shared_reference, storage_dtype), out_root / "reference_graph_and_base.pt")
+
+    manifest: dict[str, Any] = {
+        "format": "sharded_pt_v2",
+        "reference_file": "reference_graph_and_base.pt",
+        "storage_dtype": cfg.storage_dtype,
+        "save_chunk_size": cfg.save_chunk_size,
+        "splits": {},
     }
 
     for split, size in split_sizes.items():
-        samples = []
-        for i in range(size):
+        split_dir = out_root / split
+        split_dir.mkdir(parents=True, exist_ok=True)
+
+        buffer: list[dict[str, torch.Tensor]] = []
+        shard_files: list[str] = []
+        shard_idx = 0
+
+        iterator = progress(range(size), total=size, desc=f"生成 {split}", enable=cfg.show_progress)
+        for i in iterator:
             global_idx = {"train": 0, "val": 100000, "test": 200000}[split] + i
             sample = build_sample(
                 sample_idx=global_idx,
@@ -479,24 +532,39 @@ def generate_dataset(cfg: SimConfig, base_dir: Path) -> dict[str, Any]:
                 aux=aux,
                 cfg=cfg,
             )
-            samples.append(sample)
-        torch.save(samples, out_root / f"{split}.pt")
+            buffer.append(sample)
 
-    # 额外保存一个共享参考文件，便于检查
-    torch.save(
-        {
-            "x_static": x_static,
-            "edge_index": edge_index,
-            "y_base_bank": y_base_bank,
-            "profile_feat": profile_feat,
-        },
-        out_root / "reference_graph_and_base.pt",
-    )
+            if len(buffer) >= cfg.save_chunk_size:
+                shard_name = flush_chunk(buffer, split_dir, split, shard_idx, storage_dtype)
+                shard_files.append(shard_name)
+                shard_idx += 1
+                buffer.clear()
+                gc.collect()
+
+        if buffer:
+            shard_name = flush_chunk(buffer, split_dir, split, shard_idx, storage_dtype)
+            shard_files.append(shard_name)
+            buffer.clear()
+            gc.collect()
+
+        manifest["splits"][split] = {
+            "num_samples": size,
+            "num_shards": len(shard_files),
+            "shards": shard_files,
+        }
 
     with open(out_root / "meta.json", "w", encoding="utf-8") as f:
         json.dump(meta, f, ensure_ascii=False, indent=2)
 
-    return meta
+    with open(out_root / "manifest.json", "w", encoding="utf-8") as f:
+        json.dump(manifest, f, ensure_ascii=False, indent=2)
+
+    return {
+        **meta,
+        "resolved_output_dir": str(out_root),
+        "reference_file": str(out_root / "reference_graph_and_base.pt"),
+        "manifest_file": str(out_root / "manifest.json"),
+    }
 
 
 # -----------------------------
@@ -557,6 +625,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--future-noise-std", type=float, default=None)
     parser.add_argument("--event-prob", type=float, default=None)
     parser.add_argument("--seed", type=int, default=None)
+
+    parser.add_argument("--show-progress", type=lambda x: str(x).lower() in {"1", "true", "yes", "y"}, default=None)
+    parser.add_argument("--save-chunk-size", type=int, default=None)
+    parser.add_argument("--storage-dtype", type=str, choices=["float16", "float32"], default=None)
     return parser
 
 
@@ -569,7 +641,7 @@ def main() -> None:
     meta = generate_dataset(cfg, base_dir)
 
     print("模拟数据生成完成。")
-    print(json.dumps({"output_dir": cfg.output_dir, **meta}, ensure_ascii=False, indent=2))
+    print(json.dumps(meta, ensure_ascii=False, indent=2))
 
 
 if __name__ == "__main__":

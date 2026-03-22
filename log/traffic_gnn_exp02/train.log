@@ -1,0 +1,7 @@
+2026-03-22 23:37:18,401 | INFO | 读取配置: E:\vscode项目文件\Traffic_Flow_Prediction\configs\gnn_train_sharded.yaml
+2026-03-22 23:37:18,401 | INFO | 输出目录: E:\vscode项目文件\Traffic_Flow_Prediction\log\traffic_gnn_exp02
+2026-03-22 23:37:18,405 | INFO | 使用设备: cuda
+2026-03-22 23:37:55,279 | INFO | 数据加载模式: sharded_pt_v2
+2026-03-22 23:37:55,280 | INFO | 数据根目录: E:\vscode项目文件\Traffic_Flow_Prediction\2.data_processing\traffic_gnn\mock_traffic_output
+2026-03-22 23:37:55,280 | INFO | 数据集大小: train=200, val=40, test=40
+2026-03-22 23:37:55,537 | INFO | 开始 Stage 1 训练
