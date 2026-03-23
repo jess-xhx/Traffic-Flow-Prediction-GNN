@@ -5,6 +5,7 @@
 *.npy
 *.csv
 *.txt
+*.json
 
 # Python 缓存文件
 __pycache__/
