@@ -2,11 +2,11 @@ model:
   static_dim: 17
   profile_dim: 8
   event_dim: 6
-  static_hidden_dim: 32
-  calendar_hidden_dim: 32
-  profile_hidden_dim: 32
-  bank_hidden_dim: 64
-  recent_hidden_dim: 32
+  static_hidden_dim: 4
+  calendar_hidden_dim: 4
+  profile_hidden_dim: 2
+  bank_hidden_dim: 4
+  recent_hidden_dim: 2
 data:
   root_dir: ../2.data_processing/traffic_gnn/mock_traffic_output
   train_path: null
@@ -20,19 +20,19 @@ data:
   shuffle_train: true
   drop_last: false
 stage1:
-  epochs: 10
+  epochs: 1
   lr: 0.001
   weight_decay: 1.0e-05
   grad_clip: 5.0
   log_every: 1
 stage2:
-  epochs: 10
+  epochs: 1
   lr: 0.001
   weight_decay: 1.0e-05
   grad_clip: 5.0
   log_every: 1
 stage3:
-  epochs: 10
+  epochs: 1
   lr: 0.001
   weight_decay: 1.0e-05
   grad_clip: 5.0
@@ -63,4 +63,4 @@ runtime:
   use_stage1: true
   use_stage2: true
   use_stage3: true
-  use_joint: true
+  use_joint: false

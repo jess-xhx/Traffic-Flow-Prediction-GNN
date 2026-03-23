@@ -91,30 +91,65 @@ class RecentSequenceEncoder(nn.Module):
         return recent_summary
 
 
+# class ResidualGraphPropagator(nn.Module):
+#     """
+#     对 7*288 个时间片的残差做图传播
+#     输入:
+#         delta_feat [7, 288, N, D]
+#     输出:
+#         delta_feat [7, 288, N, D]
+#     """
+#     def __init__(self, hidden_dim: int):
+#         super().__init__()
+#         self.gnn1 = GATConv(hidden_dim, hidden_dim, heads=2, concat=False)
+#         self.gnn2 = GATConv(hidden_dim, hidden_dim, heads=1, concat=False)
+
+#     def forward(self, delta_feat: torch.Tensor, edge_index: torch.Tensor) -> torch.Tensor:
+#         W, S, N, D = delta_feat.shape
+#         G = W * S
+
+#         x = delta_feat.reshape(G, N, D).reshape(G * N, D)     # [G*N, D]
+#         batched_edge_index = build_batched_edge_index(edge_index, G, N)
+
+#         x = F.relu(self.gnn1(x, batched_edge_index))
+#         x = F.relu(self.gnn2(x, batched_edge_index))
+
+#         x = x.view(G, N, D).view(W, S, N, D)
+#         return x
 class ResidualGraphPropagator(nn.Module):
-    """
-    对 7*288 个时间片的残差做图传播
-    输入:
-        delta_feat [7, 288, N, D]
-    输出:
-        delta_feat [7, 288, N, D]
-    """
-    def __init__(self, hidden_dim: int):
+    def __init__(self, hidden_dim: int, time_chunk_size: int = 1):
         super().__init__()
-        self.gnn1 = GATConv(hidden_dim, hidden_dim, heads=2, concat=False)
+        self.gnn1 = GATConv(hidden_dim, hidden_dim, heads=1, concat=False)
         self.gnn2 = GATConv(hidden_dim, hidden_dim, heads=1, concat=False)
+        self.time_chunk_size = time_chunk_size
+
+    def _forward_chunk(self, chunk_feat: torch.Tensor, edge_index: torch.Tensor) -> torch.Tensor:
+        # chunk_feat: [Cg, N, D]
+        Cg, N, D = chunk_feat.shape
+
+        x = chunk_feat.reshape(Cg * N, D)
+        batched_edge_index = build_batched_edge_index(edge_index, Cg, N)
+
+        x = F.relu(self.gnn1(x, batched_edge_index))
+        x = F.relu(self.gnn2(x, batched_edge_index))
+        x = x.view(Cg, N, D)
+        return x
 
     def forward(self, delta_feat: torch.Tensor, edge_index: torch.Tensor) -> torch.Tensor:
         W, S, N, D = delta_feat.shape
         G = W * S
 
-        x = delta_feat.reshape(G, N, D).reshape(G * N, D)     # [G*N, D]
-        batched_edge_index = build_batched_edge_index(edge_index, G, N)
+        flat = delta_feat.reshape(G, N, D)
+        outputs = []
 
-        x = F.relu(self.gnn1(x, batched_edge_index))
-        x = F.relu(self.gnn2(x, batched_edge_index))
+        for start in range(0, G, self.time_chunk_size):
+            end = min(start + self.time_chunk_size, G)
+            chunk = flat[start:end]
+            out_chunk = self._forward_chunk(chunk, edge_index)
+            outputs.append(out_chunk)
 
-        x = x.view(G, N, D).view(W, S, N, D)
+        x = torch.cat(outputs, dim=0)
+        x = x.view(W, S, N, D)
         return x
 
 
@@ -164,7 +199,8 @@ class RecentResidualBank(nn.Module):
         )
 
         # 图传播平滑
-        self.graph_propagator = ResidualGraphPropagator(bank_hidden_dim)
+        # self.graph_propagator = ResidualGraphPropagator(bank_hidden_dim)
+        self.graph_propagator = ResidualGraphPropagator(bank_hidden_dim, time_chunk_size=16)
 
         self.use_speed_head = use_speed_head
         if use_speed_head:

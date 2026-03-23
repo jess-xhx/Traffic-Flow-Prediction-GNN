@@ -13,6 +13,7 @@ from typing import Any, Optional
 
 import torch
 from torch.utils.data import DataLoader, Dataset, Sampler
+from tqdm.auto import tqdm
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent
@@ -53,16 +54,21 @@ class TrafficGNNTrainer:
         criterion: Optional[TrafficGNNLoss] = None,
         logger: Optional[logging.Logger] = None,
     ):
+        
         self.device = torch.device(device)
         self.model = model.to(self.device)
         self.criterion = criterion or TrafficGNNLoss()
         self.logger = logger or logging.getLogger(__name__)
+        # 修改
+        self.use_amp = (self.device.type == 'cuda')
+        self.scaler = torch.amp.GradScaler('cuda', enabled=self.use_amp)
+        #
 
     def _run_base_epoch(
         self,
-        dataloader: DataLoader,
-        optimizer: Optional[torch.optim.Optimizer] = None,
-    ) -> dict[str, float]:
+        dataloader,
+        optimizer=None,
+):
         training = optimizer is not None
         self.model.train(training)
 
@@ -70,38 +76,60 @@ class TrafficGNNTrainer:
         total_mae = 0.0
         num_batches = 0
 
-        for raw_batch in dataloader:
+        phase_name = 'Train-Stage1' if training else 'Val-Stage1'
+        pbar = tqdm(dataloader, desc=phase_name, leave=True)
+
+        for raw_batch in pbar:
             batch = prepare_batch(raw_batch, self.device)
-            out = self.model.forward(batch, mode='base')
 
-            num_nodes = batch['x_static'].shape[0]
-            y_base_bank = ensure_bank_layout(batch['y_base_bank'], num_nodes)
-            base_mask = batch.get('base_mask')
-            if base_mask is not None:
-                base_mask = ensure_bank_layout(base_mask, num_nodes)
+            with torch.amp.autocast('cuda', enabled=self.use_amp):
+                out = self.model.forward(batch, mode='base')
 
-            loss_dict = self.criterion.base_loss(out['pred_speed_bank'], y_base_bank, base_mask)
-            loss = loss_dict['loss']
+                num_nodes = batch['x_static'].shape[0]
+                y_base_bank = ensure_bank_layout(batch['y_base_bank'], num_nodes)
+                base_mask = batch.get('base_mask')
+                if base_mask is not None:
+                    base_mask = ensure_bank_layout(base_mask, num_nodes)
+
+                loss_dict = self.criterion.base_loss(
+                    out['pred_speed_bank'],
+                    y_base_bank,
+                    base_mask
+                )
+                loss = loss_dict['loss']
 
             if training:
-                optimizer.zero_grad()
-                loss.backward()
-                optimizer.step()
+                optimizer.zero_grad(set_to_none=True)
+                self.scaler.scale(loss).backward()
+                self.scaler.step(optimizer)
+                self.scaler.update()
 
-            total_loss += float(loss.detach().item())
-            total_mae += float(loss_dict['mae'].item())
+            loss_value = float(loss.detach().item())
+            mae_value = float(loss_dict['mae'].item())
+
+            total_loss += loss_value
+            total_mae += mae_value
             num_batches += 1
 
+            pbar.set_postfix({
+                'loss': f'{loss_value:.4f}',
+                'mae': f'{mae_value:.4f}',
+                'avg_loss': f'{total_loss / num_batches:.4f}',
+            })
+
         denom = max(num_batches, 1)
-        return {'loss': total_loss / denom, 'mae': total_mae / denom}
+        return {
+            'loss': total_loss / denom,
+            'mae': total_mae / denom,
+        }
 
     def _run_recent_epoch(
         self,
-        dataloader: DataLoader,
-        optimizer: Optional[torch.optim.Optimizer] = None,
-        detach_base: bool = True,
-        grad_clip: float | None = None,
-    ) -> dict[str, float]:
+        dataloader,
+        optimizer=None,
+        detach_base=True,
+        grad_clip=None,
+):
         training = optimizer is not None
         self.model.train(training)
 
@@ -110,43 +138,70 @@ class TrafficGNNTrainer:
         total_reg = 0.0
         num_batches = 0
 
-        for raw_batch in dataloader:
+        phase_name = 'Train-Stage2' if training else 'Val-Stage2'
+        pbar = tqdm(dataloader, desc=phase_name, leave=True)
+
+        for raw_batch in pbar:
             batch = prepare_batch(raw_batch, self.device)
-            out = self.model.forward(batch, mode='recent', detach_base=detach_base)
 
-            num_nodes = batch['x_static'].shape[0]
-            y_future_bank = ensure_bank_layout(batch['y_future_bank'], num_nodes)
-            future_mask = batch.get('future_mask')
-            if future_mask is not None:
-                future_mask = ensure_bank_layout(future_mask, num_nodes)
+            with torch.amp.autocast('cuda', enabled=self.use_amp):
+                out = self.model.forward(batch, mode='recent', detach_base=detach_base)
 
-            loss_dict = self.criterion.recent_loss(
-                out['pred_speed_bank'], y_future_bank, out['delta_recent_bank'], future_mask
-            )
-            loss = loss_dict['loss']
+                num_nodes = batch['x_static'].shape[0]
+                y_future_bank = ensure_bank_layout(batch['y_future_bank'], num_nodes)
+                future_mask = batch.get('future_mask')
+                if future_mask is not None:
+                    future_mask = ensure_bank_layout(future_mask, num_nodes)
+
+                loss_dict = self.criterion.recent_loss(
+                    out['pred_speed_bank'],
+                    y_future_bank,
+                    out['delta_recent_bank'],
+                    future_mask
+                )
+                loss = loss_dict['loss']
 
             if training:
-                optimizer.zero_grad()
-                loss.backward()
-                if grad_clip is not None:
-                    torch.nn.utils.clip_grad_norm_(self.model.recent.parameters(), grad_clip)
-                optimizer.step()
+                optimizer.zero_grad(set_to_none=True)
+                self.scaler.scale(loss).backward()
 
-            total_loss += float(loss.detach().item())
-            total_mae += float(loss_dict['mae'].item())
-            total_reg += float(loss_dict['reg'].item())
+                if grad_clip is not None:
+                    self.scaler.unscale_(optimizer)
+                    torch.nn.utils.clip_grad_norm_(self.model.recent.parameters(), grad_clip)
+
+                self.scaler.step(optimizer)
+                self.scaler.update()
+
+            loss_value = float(loss.detach().item())
+            mae_value = float(loss_dict['mae'].item())
+            reg_value = float(loss_dict['reg'].item())
+
+            total_loss += loss_value
+            total_mae += mae_value
+            total_reg += reg_value
             num_batches += 1
 
+            pbar.set_postfix({
+                'loss': f'{loss_value:.4f}',
+                'mae': f'{mae_value:.4f}',
+                'reg': f'{reg_value:.4f}',
+                'avg_loss': f'{total_loss / num_batches:.4f}',
+            })
+
         denom = max(num_batches, 1)
-        return {'loss': total_loss / denom, 'mae': total_mae / denom, 'reg': total_reg / denom}
+        return {
+            'loss': total_loss / denom,
+            'mae': total_mae / denom,
+            'reg': total_reg / denom,
+        }
 
     def _run_event_epoch(
         self,
-        dataloader: DataLoader,
-        optimizer: Optional[torch.optim.Optimizer] = None,
-        detach_pre_event: bool = True,
-        grad_clip: float | None = None,
-    ) -> dict[str, float]:
+        dataloader,
+        optimizer=None,
+        detach_pre_event=True,
+        grad_clip=None,
+):
         training = optimizer is not None
         self.model.train(training)
 
@@ -155,35 +210,62 @@ class TrafficGNNTrainer:
         total_reg = 0.0
         num_batches = 0
 
-        for raw_batch in dataloader:
+        phase_name = 'Train-Stage3' if training else 'Val-Stage3'
+        pbar = tqdm(dataloader, desc=phase_name, leave=True)
+
+        for raw_batch in pbar:
             batch = prepare_batch(raw_batch, self.device)
-            out = self.model.forward(batch, mode='event', detach_pre_event=detach_pre_event)
 
-            num_nodes = batch['x_static'].shape[0]
-            y_target_speed = ensure_node_vector_layout(batch['y_target_speed'], num_nodes)
-            event_mask = batch.get('event_mask')
-            if event_mask is not None:
-                event_mask = ensure_node_vector_layout(event_mask, num_nodes)
+            with torch.amp.autocast('cuda', enabled=self.use_amp):
+                out = self.model.forward(batch, mode='event', detach_pre_event=detach_pre_event)
 
-            loss_dict = self.criterion.event_loss(
-                out['pred_speed_t'], y_target_speed, out['delta_event_t'], event_mask
-            )
-            loss = loss_dict['loss']
+                num_nodes = batch['x_static'].shape[0]
+                y_target_speed = ensure_node_vector_layout(batch['y_target_speed'], num_nodes)
+                event_mask = batch.get('event_mask')
+                if event_mask is not None:
+                    event_mask = ensure_node_vector_layout(event_mask, num_nodes)
+
+                loss_dict = self.criterion.event_loss(
+                    out['pred_speed_t'],
+                    y_target_speed,
+                    out['delta_event_t'],
+                    event_mask
+                )
+                loss = loss_dict['loss']
 
             if training:
-                optimizer.zero_grad()
-                loss.backward()
-                if grad_clip is not None:
-                    torch.nn.utils.clip_grad_norm_(self.model.event.parameters(), grad_clip)
-                optimizer.step()
+                optimizer.zero_grad(set_to_none=True)
+                self.scaler.scale(loss).backward()
 
-            total_loss += float(loss.detach().item())
-            total_mae += float(loss_dict['mae'].item())
-            total_reg += float(loss_dict['reg'].item())
+                if grad_clip is not None:
+                    self.scaler.unscale_(optimizer)
+                    torch.nn.utils.clip_grad_norm_(self.model.event.parameters(), grad_clip)
+
+                self.scaler.step(optimizer)
+                self.scaler.update()
+
+            loss_value = float(loss.detach().item())
+            mae_value = float(loss_dict['mae'].item())
+            reg_value = float(loss_dict['reg'].item())
+
+            total_loss += loss_value
+            total_mae += mae_value
+            total_reg += reg_value
             num_batches += 1
 
+            pbar.set_postfix({
+                'loss': f'{loss_value:.4f}',
+                'mae': f'{mae_value:.4f}',
+                'reg': f'{reg_value:.4f}',
+                'avg_loss': f'{total_loss / num_batches:.4f}',
+            })
+
         denom = max(num_batches, 1)
-        return {'loss': total_loss / denom, 'mae': total_mae / denom, 'reg': total_reg / denom}
+        return {
+            'loss': total_loss / denom,
+            'mae': total_mae / denom,
+            'reg': total_reg / denom,
+        }
 
     def _run_joint_epoch(
         self,
@@ -203,53 +285,87 @@ class TrafficGNNTrainer:
         total_event = 0.0
         num_batches = 0
 
-        for raw_batch in dataloader:
+        phase_name = 'Train-Joint' if training else 'Val-Joint'
+        pbar = tqdm(dataloader, desc=phase_name, leave=True)
+
+        for raw_batch in pbar:
             batch = prepare_batch(raw_batch, self.device)
             num_nodes = batch['x_static'].shape[0]
 
-            base_out = self.model.forward(batch, mode='base')
-            y_base_bank = ensure_bank_layout(batch['y_base_bank'], num_nodes)
-            base_mask = batch.get('base_mask')
-            if base_mask is not None:
-                base_mask = ensure_bank_layout(base_mask, num_nodes)
-            base_loss_dict = self.criterion.base_loss(base_out['pred_speed_bank'], y_base_bank, base_mask)
+            with torch.amp.autocast('cuda', enabled=self.use_amp):
+                base_out = self.model.forward(batch, mode='base')
+                y_base_bank = ensure_bank_layout(batch['y_base_bank'], num_nodes)
+                base_mask = batch.get('base_mask')
+                if base_mask is not None:
+                    base_mask = ensure_bank_layout(base_mask, num_nodes)
 
-            recent_out = self.model.forward(batch, mode='recent', detach_base=False)
-            y_future_bank = ensure_bank_layout(batch['y_future_bank'], num_nodes)
-            future_mask = batch.get('future_mask')
-            if future_mask is not None:
-                future_mask = ensure_bank_layout(future_mask, num_nodes)
-            recent_loss_dict = self.criterion.recent_loss(
-                recent_out['pred_speed_bank'], y_future_bank, recent_out['delta_recent_bank'], future_mask
-            )
+                base_loss_dict = self.criterion.base_loss(
+                    base_out['pred_speed_bank'],
+                    y_base_bank,
+                    base_mask
+                )
 
-            event_out = self.model.forward(batch, mode='event', detach_pre_event=False)
-            y_target_speed = ensure_node_vector_layout(batch['y_target_speed'], num_nodes)
-            event_mask = batch.get('event_mask')
-            if event_mask is not None:
-                event_mask = ensure_node_vector_layout(event_mask, num_nodes)
-            event_loss_dict = self.criterion.event_loss(
-                event_out['pred_speed_t'], y_target_speed, event_out['delta_event_t'], event_mask
-            )
+                recent_out = self.model.forward(batch, mode='recent', detach_base=False)
+                y_future_bank = ensure_bank_layout(batch['y_future_bank'], num_nodes)
+                future_mask = batch.get('future_mask')
+                if future_mask is not None:
+                    future_mask = ensure_bank_layout(future_mask, num_nodes)
 
-            loss = (
-                joint_cfg.alpha_base * base_loss_dict['loss']
-                + joint_cfg.beta_recent * recent_loss_dict['loss']
-                + joint_cfg.gamma_event * event_loss_dict['loss']
-            )
+                recent_loss_dict = self.criterion.recent_loss(
+                    recent_out['pred_speed_bank'],
+                    y_future_bank,
+                    recent_out['delta_recent_bank'],
+                    future_mask
+                )
+
+                event_out = self.model.forward(batch, mode='event', detach_pre_event=False)
+                y_target_speed = ensure_node_vector_layout(batch['y_target_speed'], num_nodes)
+                event_mask = batch.get('event_mask')
+                if event_mask is not None:
+                    event_mask = ensure_node_vector_layout(event_mask, num_nodes)
+
+                event_loss_dict = self.criterion.event_loss(
+                    event_out['pred_speed_t'],
+                    y_target_speed,
+                    event_out['delta_event_t'],
+                    event_mask
+                )
+
+                loss = (
+                    joint_cfg.alpha_base * base_loss_dict['loss']
+                    + joint_cfg.beta_recent * recent_loss_dict['loss']
+                    + joint_cfg.gamma_event * event_loss_dict['loss']
+                )
 
             if training:
-                optimizer.zero_grad()
-                loss.backward()
-                if joint_cfg.grad_clip is not None:
-                    torch.nn.utils.clip_grad_norm_(self.model.parameters(), joint_cfg.grad_clip)
-                optimizer.step()
+                optimizer.zero_grad(set_to_none=True)
+                self.scaler.scale(loss).backward()
 
-            total_loss += float(loss.detach().item())
-            total_base += float(base_loss_dict['loss'].detach().item())
-            total_recent += float(recent_loss_dict['loss'].detach().item())
-            total_event += float(event_loss_dict['loss'].detach().item())
+                if joint_cfg.grad_clip is not None:
+                    self.scaler.unscale_(optimizer)
+                    torch.nn.utils.clip_grad_norm_(self.model.parameters(), joint_cfg.grad_clip)
+
+                self.scaler.step(optimizer)
+                self.scaler.update()
+
+            loss_value = float(loss.detach().item())
+            base_value = float(base_loss_dict['loss'].detach().item())
+            recent_value = float(recent_loss_dict['loss'].detach().item())
+            event_value = float(event_loss_dict['loss'].detach().item())
+
+            total_loss += loss_value
+            total_base += base_value
+            total_recent += recent_value
+            total_event += event_value
             num_batches += 1
+
+            pbar.set_postfix({
+                'loss': f'{loss_value:.4f}',
+                'base': f'{base_value:.4f}',
+                'recent': f'{recent_value:.4f}',
+                'event': f'{event_value:.4f}',
+                'avg_loss': f'{total_loss / num_batches:.4f}',
+            })
 
         denom = max(num_batches, 1)
         return {
@@ -258,7 +374,7 @@ class TrafficGNNTrainer:
             'recent_loss': total_recent / denom,
             'event_loss': total_event / denom,
         }
-
+        
     def save_checkpoint(self, path: str | Path, extra: Optional[dict[str, Any]] = None) -> None:
         path = Path(path)
         path.parent.mkdir(parents=True, exist_ok=True)

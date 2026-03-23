@@ -124,33 +124,73 @@ class ProfileEncoder(nn.Module):
         return x
 
 
-class BankMLP(nn.Module):
-    """
-    轻量版 bank 生成器
-    不再对 7*288 个时间片展开成超大 batch 图做 GAT，
-    而是对每个 (weekday, slot, road) 位置的融合特征逐位置做 MLP 映射。
+# class TimeSliceGraphEncoder(nn.Module):
+#     """
+#     对 7*288 个时间片批量做图传播
+#     输入:
+#         fused_feat [7, 288, N, F]
+#     输出:
+#         road_state_bank [7, 288, N, D]
+#     """
+#     def __init__(self, input_dim: int, hidden_dim: int):
+#         super().__init__()
+#         self.gnn1 = GATConv(input_dim, hidden_dim, heads=4, concat=False)
+#         self.gnn2 = GATConv(hidden_dim, hidden_dim, heads=1, concat=False)
 
-    输入:
-        fused_feat [7, 288, N, F]
-    输出:
-        road_state_bank [7, 288, N, D]
-    """
-    def __init__(self, input_dim: int, hidden_dim: int, dropout: float = 0.1):
+#     def forward(self, fused_feat: torch.Tensor, edge_index: torch.Tensor) -> torch.Tensor:
+#         """
+#         fused_feat: [7, 288, N, F]
+#         edge_index: [2, E]
+#         """
+#         W, S, N, Fdim = fused_feat.shape
+#         G = W * S
+
+#         fused_flat = fused_feat.reshape(G, N, Fdim)        # [2016, N, F]
+#         fused_flat = fused_flat.reshape(G * N, Fdim)       # [2016*N, F]
+
+#         batched_edge_index = build_batched_edge_index(edge_index, G, N)
+
+#         x = F.relu(self.gnn1(fused_flat, batched_edge_index))
+#         x = F.relu(self.gnn2(x, batched_edge_index))
+
+#         x = x.view(G, N, -1)          # [2016, N, D]
+#         x = x.view(W, S, N, -1)       # [7, 288, N, D]
+#         return x
+class TimeSliceGraphEncoder(nn.Module):
+    def __init__(self, input_dim: int, hidden_dim: int, time_chunk_size: int = 1): # 原始int = 16
         super().__init__()
-        self.net = nn.Sequential(
-            nn.Linear(input_dim, hidden_dim),
-            nn.ReLU(),
-            nn.Dropout(dropout),
-            nn.Linear(hidden_dim, hidden_dim),
-        )
+        self.gnn1 = GATConv(input_dim, hidden_dim, heads=1, concat=False) # 原始heads=4
+        self.gnn2 = GATConv(hidden_dim, hidden_dim, heads=1, concat=False)
+        self.time_chunk_size = time_chunk_size
 
-    def forward(self, fused_feat: torch.Tensor) -> torch.Tensor:
-        """
-        fused_feat: [7, 288, N, F]
-        return:     [7, 288, N, D]
-        """
-        return self.net(fused_feat)
+    def _forward_chunk(self, chunk_feat: torch.Tensor, edge_index: torch.Tensor) -> torch.Tensor:
+        # chunk_feat: [Cg, N, F]
+        Cg, N, Fdim = chunk_feat.shape
 
+        x = chunk_feat.reshape(Cg * N, Fdim)
+        batched_edge_index = build_batched_edge_index(edge_index, Cg, N)
+
+        x = F.relu(self.gnn1(x, batched_edge_index))
+        x = F.relu(self.gnn2(x, batched_edge_index))
+        x = x.view(Cg, N, -1)
+        return x
+
+    def forward(self, fused_feat: torch.Tensor, edge_index: torch.Tensor) -> torch.Tensor:
+        W, S, N, Fdim = fused_feat.shape
+        G = W * S
+
+        fused_flat = fused_feat.reshape(G, N, Fdim)   # [2016, N, F]
+        outputs = []
+
+        for start in range(0, G, self.time_chunk_size):
+            end = min(start + self.time_chunk_size, G)
+            chunk = fused_flat[start:end]             # [Cg, N, F]
+            out_chunk = self._forward_chunk(chunk, edge_index)
+            outputs.append(out_chunk)
+
+        x = torch.cat(outputs, dim=0)                 # [2016, N, D]
+        x = x.view(W, S, N, -1)
+        return x
 
 
 class BaseWeeklyBank(nn.Module):
@@ -187,7 +227,8 @@ class BaseWeeklyBank(nn.Module):
         self.profile_encoder = ProfileEncoder(profile_dim, profile_hidden_dim)
 
         fused_dim = static_hidden_dim + calendar_hidden_dim + profile_hidden_dim
-        self.bank_mlp = BankMLP(fused_dim, bank_hidden_dim, dropout=0.1)
+        # self.time_slice_gnn = TimeSliceGraphEncoder(fused_dim, bank_hidden_dim)
+        self.time_slice_gnn = TimeSliceGraphEncoder(fused_dim, bank_hidden_dim, time_chunk_size=16)
 
         self.use_speed_head = use_speed_head
         if use_speed_head:
@@ -230,8 +271,8 @@ class BaseWeeklyBank(nn.Module):
 
         fused_feat = torch.cat([static_expand, calendar_expand, profile_emb], dim=-1) # [7, 288, N, F]
 
-        # 5) 轻量版 bank 生成：不再把 2016 个时间片整块展开做图传播，避免显存爆炸
-        H_base_bank = self.bank_mlp(fused_feat)                                       # [7, 288, N, D]
+        # 5) 对 2016 个时间片一起做图传播，得到 bank
+        H_base_bank = self.time_slice_gnn(fused_feat, edge_index)                     # [7, 288, N, D]
 
         if not self.use_speed_head:
             return H_base_bank
