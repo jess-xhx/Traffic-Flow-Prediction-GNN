@@ -1,0 +1,25 @@
+# 数据集和缓存 (拦截具体的大文件后缀，放行文件夹)
+*.pt
+*.pth
+*.graphml
+*.npy
+*.csv
+*.txt
+*.json
+
+# Python 缓存文件
+__pycache__/
+*.pyc
+
+# 虚拟环境
+venv/
+env/
+.env
+
+# 拦截所有缓存 json 文件
+data/cache/*.json
+# 或者直接拦截整个缓存文件夹
+data/cache/
+
+# 编辑器配置
+.vscode/
