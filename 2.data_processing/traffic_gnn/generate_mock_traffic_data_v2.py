@@ -376,10 +376,11 @@ def build_sample(
     node_drift = torch.randn(num_nodes, generator=gen) * (1.5 + 2.5 * (1.0 - road_score_norm))
     node_drift = smooth_signal(node_drift, edge_index, num_steps=2, alpha=0.72)
 
+    day_grid = torch.linspace(0, 2 * math.pi, 288, dtype=torch.float32)
     daily_phase = float(torch.rand(1, generator=gen).item()) * 2 * math.pi
     daily_curve = (
-        0.65 * torch.sin(torch.linspace(0, 2 * math.pi, 288) + daily_phase)
-        + 0.35 * torch.cos(torch.linspace(0, 4 * math.pi, 288) + 0.5 * daily_phase)
+        0.65 * torch.sin(day_grid + daily_phase)
+        + 0.35 * torch.cos(2.0 * day_grid + 0.5 * daily_phase)
     )
     weekly_curve = torch.tensor([0.8, 0.5, 0.2, 0.0, 0.6, -0.3, -0.5], dtype=torch.float32)
     weekly_shift = float(torch.randn(1, generator=gen).item()) * 0.6
@@ -432,25 +433,77 @@ def build_sample(
         extra = smooth_signal(extra, edge_index, num_steps=2, alpha=0.7)
         event_vector[:, len(event_candidates):] = extra
 
-    base_target = y_future_bank[target_weekday, target_slot]
-    event_drop = (
+    # 事件起点：直接沿用当前样本的目标时刻
+    event_weekday = target_weekday
+    event_slot = target_slot
+    event_start_index = _week_index_from_pair(event_weekday, event_slot)
+
+    # 当前时刻的基础事件强度（每个节点一个）
+    base_event_drop = (
         severity * (5.0 + 12.0 * (1.0 - road_score_norm))
         + 4.0 * spill
         + 6.0 * closure
-    )
-    event_drop = event_drop.clamp_min(0.0)
-    y_target_speed = (base_target - event_drop).clamp_min(3.0)
+    ).clamp_min(0.0)  # [N]
 
-    # 注意：共享量不再在每个样本里重复存一份，避免体积过大
+    # 构造“事件从当前时刻持续到当前周结束”的监督 bank
+    y_event_bank = y_future_bank.clone()                                   # [7, 288, N]
+    event_bank_mask = torch.zeros_like(y_future_bank, dtype=torch.float32) # [7, 288, N]
+
+    flat_future = y_future_bank.view(7 * 288, num_nodes)                   # [2016, N]
+    flat_event = y_event_bank.view(7 * 288, num_nodes)                     # [2016, N]
+    flat_mask = event_bank_mask.view(7 * 288, num_nodes)                   # [2016, N]
+
+    remain_len = 7 * 288 - event_start_index
+    delta_slots = torch.arange(remain_len, dtype=torch.float32)            # [F]
+
+    # 每个节点一个衰减率：主干道路/高等级道路恢复更快；严重事件恢复更慢
+    node_decay_rate = (
+        0.35
+        + 0.45 * road_score_norm
+        + 0.20 * (1.0 - severity.clamp(0.0, 1.0))
+    ).clamp(0.15, 0.95)                                                    # [N]
+
+    delta_days = (delta_slots / 288.0).view(remain_len, 1)                 # [F, 1]
+    alpha = torch.exp(-delta_days * node_decay_rate.view(1, num_nodes))    # [F, N]
+
+    # 让最开始一小段影响更明显，避免纯指数太平
+    early_boost = 1.0 + 0.15 * torch.exp(-delta_days / 0.15)               # [F, 1]
+
+    # 当前周尾部事件影响
+    tail_drop = alpha * early_boost * base_event_drop.view(1, num_nodes)   # [F, N]
+
+    flat_event[event_start_index:] = (flat_future[event_start_index:] - tail_drop).clamp_min(3.0)
+    flat_mask[event_start_index:] = 1.0
+
+    # 兼容旧版单点 event 训练
+    y_target_speed = y_event_bank[event_weekday, event_slot].clone()       # [N]
+
     sample = {
         "recent_speed_seq": recent_speed_seq.float(),
+
+        # 旧字段：兼容现有代码
         "target_weekday": torch.tensor(target_weekday, dtype=torch.long),
         "target_slot": torch.tensor(target_slot, dtype=torch.long),
+
+        # 新字段：明确事件起点
+        "event_weekday": torch.tensor(event_weekday, dtype=torch.long),
+        "event_slot": torch.tensor(event_slot, dtype=torch.long),
+
         "event_vector": event_vector.float(),
+
+        # Stage2 目标
         "y_future_bank": y_future_bank.float(),
+
+        # Stage3 目标：事件作用到当前周结束后的 bank
+        "y_event_bank": y_event_bank.float(),
+
+        # 兼容旧版单点 event loss / 调试
         "y_target_speed": y_target_speed.float(),
+
         "future_mask": torch.ones_like(y_future_bank, dtype=torch.float32),
-        "event_mask": torch.ones_like(y_target_speed, dtype=torch.float32),
+
+        # 新版 Stage3 用 [7, 288, N] mask
+        "event_mask": event_bank_mask.float(),
     }
     return sample
 
@@ -494,6 +547,8 @@ def generate_dataset(cfg: SimConfig, base_dir: Path) -> dict[str, Any]:
         "save_chunk_size": cfg.save_chunk_size,
         "storage_dtype": cfg.storage_dtype,
         "format": "sharded_pt_v2",
+        "has_event_bank_target": True,
+        "event_mode": "tail_to_week_end",
     }
 
     shared_reference = {

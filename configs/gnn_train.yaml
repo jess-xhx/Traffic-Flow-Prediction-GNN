@@ -1,18 +1,35 @@
-# 运行方式:
-# torchrun --standalone --nproc_per_node=2 train_gnn_ddp.py --config configs/gnn_train_sharded.yaml
-
 model:
+  # 输入维度
   static_dim: 17
   profile_dim: 8
   event_dim: 6
+
+  # 隐藏层维度
   static_hidden_dim: 8
   calendar_hidden_dim: 8
   profile_hidden_dim: 8
   bank_hidden_dim: 16
   recent_hidden_dim: 8
 
+  # ---- 模块1 ----
+  base_time_chunk_size: 64
+  temporal_kernel_size: 3
+  temporal_dropout: 0.0
+  temporal_dilations: [1, 2, 4]
+  temporal_node_chunk_size: 64
+
+  # ---- 模块2 ----
+  recent_time_chunk_size: 64
+
+  # ---- 模块3 ----
+  event_future_chunk_size: 16
+
+  # ---- checkpoint ----
+  enable_base_checkpoint: true
+  enable_recent_checkpoint: true
+
 data:
-  root_dir: ../2.data_processing/traffic_gnn/mock_traffic_output
+  root_dir: ../2.data_processing/traffic_gnn/mock_traffic_output_week_event
   train_path: null
   val_path: null
   test_path: null
@@ -26,39 +43,47 @@ data:
   drop_last: false
 
 stage1:
-  epochs: 20
+  epochs: 1
   lr: 0.001
   weight_decay: 0.00001
   grad_clip: 5.0
   log_every: 1
+  max_steps_per_epoch: 20
 
 stage2:
-  epochs: 20
+  epochs: 1
   lr: 0.001
   weight_decay: 0.00001
   grad_clip: 5.0
   log_every: 1
+  max_steps_per_epoch: 20
 
 stage3:
-  epochs: 20
+  epochs: 1
   lr: 0.001
   weight_decay: 0.00001
   grad_clip: 5.0
   log_every: 1
+  max_steps_per_epoch: 20
 
 joint:
   epochs: 1
-  lr_base: 0.0001
-  lr_recent: 0.0003
-  lr_event: 0.0005
+
+  lr_base: 5.0e-5
+  lr_recent: 1.0e-4
+  lr_event: 2.0e-4
+
   weight_decay: 0.00001
+
   alpha_base: 0.2
   beta_recent: 0.3
-  gamma_event: 1.0
-  lambda_recent_reg: 0.0001
-  lambda_event_reg: 0.0001
+  gamma_event: 0.7
+
+  lambda_recent_reg: 1.0e-4
+  lambda_event_reg: 1.0e-4
   grad_clip: 5.0
   log_every: 1
+  max_steps_per_epoch: 20
 
 runtime:
   seed: 42
@@ -66,11 +91,15 @@ runtime:
   device: auto
   output_dir: ./log
   experiment_name: traffic_gnn_exp01
+
+  # 只跑联合模块的时候用：指向 stage3 的权重
+  # resume_checkpoint: ./log/traffic_gnn_exp60/checkpoints/stage3_best.pt
   resume_checkpoint: null
+
   save_every_epoch: true
   monitor: val_loss
   monitor_mode: min
   use_stage1: true
   use_stage2: true
   use_stage3: true
-  use_joint: false 
+  use_joint: true 

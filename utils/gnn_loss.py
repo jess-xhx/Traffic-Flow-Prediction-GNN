@@ -40,13 +40,13 @@ class TrafficGNNLoss(nn.Module):
 
     def event_loss(
         self,
-        pred_speed_t: Tensor,
-        y_target_speed: Tensor,
-        delta_event_t: Tensor,
+        pred_speed,
+        target_speed,
+        delta_event,
         mask: Tensor | None = None,
     ) -> dict[str, Tensor]:
-        data_loss = masked_mae(pred_speed_t, y_target_speed, mask)
-        reg_loss = delta_event_t.pow(2).mean()
+        data_loss = masked_mae(pred_speed, target_speed, mask)
+        reg_loss = delta_event.pow(2).mean()
         total = data_loss + self.lambda_event_reg * reg_loss
         return {
             'loss': total,

@@ -1,0 +1,48 @@
+# 运行方式:
+# python eta_train_final.py --config configs/eta_train.yaml
+#
+# 说明:
+# 1. 这份文件的组织风格参考你的 gnn_train_sharded.yaml。
+# 2. eta_train_final.py 当前如果还是 argparse 版本，这份文件可先作为统一参数清单。
+# 3. 下一步只需要给 eta_train_final.py 增加 --config 读取逻辑，就能像 GNN 一样直接跑 yaml。
+
+paths:
+  trip_dir: /HUBU-AI095/xhx/1.data/gps_trajectory
+  road_bundle_path: /path/to/baoding_static_road_gnn_dataset.pt
+  profile_feat_path: /path/to/reference_graph_and_base.pt
+  gnn_config: configs/gnn_train_sharded.yaml
+  gnn_checkpoint: /path/to/gnn_best.pt
+  recent_speed_seq_path: null
+  event_vector_path: null
+
+model:
+  bank_mode: base          # 可选: base / recent / joint
+  freeze_gnn_backbone: true
+
+  d_model: 128
+  nhead: 8
+  num_layers: 4
+  predict_uncertainty: true
+
+data:
+  min_elapsed_min: 30.0
+  step_min: 30.0
+  min_remaining_min: 10.0
+  topk_match: 5
+  max_route_len: 256
+
+  batch_size: 8
+  num_workers: 0
+
+train:
+  epochs: 10
+  lr: 0.0001
+  weight_decay: 0.00001
+  grad_clip: 5.0
+  val_ratio: 0.15
+
+runtime:
+  seed: 42
+  device: auto
+  output_dir: ./log
+  experiment_name: samecity_eta_final_exp01

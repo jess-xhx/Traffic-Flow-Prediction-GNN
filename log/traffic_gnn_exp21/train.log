@@ -1,0 +1,21 @@
+2026-03-28 21:33:57,602 | INFO | 读取配置: /HUBU-AI095/xhx/configs/gnn_train_sharded.yaml
+2026-03-28 21:33:57,603 | INFO | 输出目录: /HUBU-AI095/xhx/log/traffic_gnn_exp21
+2026-03-28 21:33:57,722 | INFO | 使用设备: cuda
+2026-03-28 21:36:44,320 | INFO | 数据加载模式: sharded_pt_v2
+2026-03-28 21:36:44,320 | INFO | 数据根目录: /HUBU-AI095/xhx/2.data_processing/traffic_gnn/mock_traffic_output_week_event
+2026-03-28 21:36:44,320 | INFO | 总样本数: train=200, val=40, test=40
+2026-03-28 21:36:44,321 | INFO | 每个 rank 的 train steps: 200
+2026-03-28 21:36:44,321 | INFO | 每个 rank 的 val steps: 40
+2026-03-28 21:36:45,271 | INFO | 开始 Stage 1 训练
+2026-03-28 21:44:45,055 | INFO | {'epoch': 1, 'stage': 1, 'train_loss': 15.436059954166412, 'train_mae': 15.436059954166412, 'val_loss': 2.146918052434921, 'val_mae': 2.146918052434921}
+2026-03-28 21:44:45,119 | INFO | 清理显存: stage1_return
+2026-03-28 21:44:45,522 | INFO | 清理显存: after_stage1
+2026-03-28 21:44:45,596 | INFO | 开始 Stage 2 训练
+2026-03-28 21:52:56,613 | INFO | {'epoch': 1, 'stage': 2, 'train_loss': 9.837061774730682, 'train_mae': 9.83233020544052, 'train_reg': 47.3156659425213, 'val_loss': 3.1152851223945617, 'val_mae': 3.1092402935028076, 'val_reg': 60.448324012756345}
+2026-03-28 21:52:56,634 | INFO | 清理显存: stage2_return
+2026-03-28 21:52:56,936 | INFO | 清理显存: after_stage2
+2026-03-28 21:52:57,013 | INFO | 开始 Stage 3 训练
+2026-03-28 21:59:36,703 | INFO | {'epoch': 1, 'stage': 3, 'train_loss': 7.687186952829361, 'train_mae': 7.685634834766388, 'train_reg': 15.520942826131359, 'val_loss': 3.9400790333747864, 'val_mae': 3.938405120372772, 'val_reg': 16.73914666324854}
+2026-03-28 21:59:36,737 | INFO | 清理显存: stage3_return
+2026-03-28 21:59:37,173 | INFO | 清理显存: after_stage3
+2026-03-28 21:59:37,258 | INFO | 开始 Joint Finetune

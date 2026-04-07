@@ -1,7 +1,7 @@
 seed: 42
 
 # 输出到当前脚本同级目录下
-output_dir: ./mock_traffic_output
+output_dir: ./mock_traffic_output_week_event
 
 graph_bundle_path: ../Static_road/baoding_static_road_gnn_dataset.pt
 x_static_key: x

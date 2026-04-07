@@ -50,7 +50,6 @@ try:
     from utils.gnn_utils import (
         ensure_bank_layout,
         ensure_dir,
-        ensure_node_vector_layout,
         freeze_module,
         prepare_batch,
         save_json,
@@ -62,7 +61,6 @@ except ImportError:
     from gnn_utils import (
         ensure_bank_layout,
         ensure_dir,
-        ensure_node_vector_layout,
         freeze_module,
         prepare_batch,
         save_json,
@@ -161,6 +159,16 @@ class TrafficGNNTrainer:
         self.use_amp = (self.device.type == 'cuda')
         self.scaler = torch.amp.GradScaler('cuda', enabled=self.use_amp)
 
+    def _select_batch_keys(self, raw_batch: dict[str, Any], keys: list[str]) -> dict[str, Any]:
+        selected = {}
+        for k in keys:
+            if k in raw_batch:
+                selected[k] = raw_batch[k]
+        return selected
+
+    def _prepare_stage_batch(self, raw_batch: dict[str, Any], keys: list[str]) -> dict[str, Any]:
+        selected = self._select_batch_keys(raw_batch, keys)
+        return prepare_batch(selected, self.device) 
 
     def clear_cuda_memory(self, tag: str = '') -> None:
         if self.is_main_process and tag:
@@ -235,6 +243,7 @@ class TrafficGNNTrainer:
         self,
         dataloader: DataLoader,
         optimizer: Optional[torch.optim.Optimizer] = None,
+        max_steps_per_epoch: int | None = None,
     ) -> dict[str, float]:
         training = optimizer is not None
         self.model.train(training)
@@ -244,8 +253,13 @@ class TrafficGNNTrainer:
         num_batches = 0
 
         pbar = self._pbar(dataloader, 'Train-Stage1' if training else 'Val-Stage1')
-        for raw_batch in pbar:
-            batch = prepare_batch(raw_batch, self.device)
+        for step, raw_batch in enumerate(pbar):
+            if max_steps_per_epoch is not None and step >= max_steps_per_epoch:
+                break
+            batch = self._prepare_stage_batch(
+            raw_batch,
+            ['x_static', 'profile_feat', 'edge_index', 'y_base_bank', 'base_mask']
+            )
 
             with torch.amp.autocast('cuda', enabled=self.use_amp):
                 out = self.model.forward(batch, mode='base')
@@ -282,6 +296,7 @@ class TrafficGNNTrainer:
         optimizer: Optional[torch.optim.Optimizer] = None,
         detach_base: bool = True,
         grad_clip: float | None = None,
+        max_steps_per_epoch: int | None = None,
     ) -> dict[str, float]:
         training = optimizer is not None
         self.model.train(training)
@@ -292,8 +307,17 @@ class TrafficGNNTrainer:
         num_batches = 0
 
         pbar = self._pbar(dataloader, 'Train-Stage2' if training else 'Val-Stage2')
-        for raw_batch in pbar:
-            batch = prepare_batch(raw_batch, self.device)
+        for step, raw_batch in enumerate(pbar):
+            if max_steps_per_epoch is not None and step >= max_steps_per_epoch:
+                break
+            batch = self._prepare_stage_batch(
+                raw_batch,
+                [
+                    'x_static', 'profile_feat', 'edge_index',
+                    'recent_speed_seq',
+                    'y_future_bank', 'future_mask'
+                ]
+            )
 
             with torch.amp.autocast('cuda', enabled=self.use_amp):
                 out = self.model.forward(batch, mode='recent', detach_base=detach_base, return_full=False)
@@ -342,6 +366,7 @@ class TrafficGNNTrainer:
         optimizer: Optional[torch.optim.Optimizer] = None,
         detach_pre_event: bool = True,
         grad_clip: float | None = None,
+        max_steps_per_epoch: int | None = None,
     ) -> dict[str, float]:
         training = optimizer is not None
         self.model.train(training)
@@ -352,17 +377,41 @@ class TrafficGNNTrainer:
         num_batches = 0
 
         pbar = self._pbar(dataloader, 'Train-Stage3' if training else 'Val-Stage3')
-        for raw_batch in pbar:
-            batch = prepare_batch(raw_batch, self.device)
+        for step, raw_batch in enumerate(pbar):
+            if max_steps_per_epoch is not None and step >= max_steps_per_epoch:
+                break
+
+            stage3_keys = [
+                'x_static', 'profile_feat', 'edge_index',
+                'recent_speed_seq',
+                'event_weekday', 'event_slot',
+                'event_vector',
+                'y_event_bank',
+                'event_mask',
+            ]
+            batch = self._prepare_stage_batch(raw_batch, stage3_keys)
+
+            if 'y_event_bank' not in batch:
+                raise KeyError('Stage3 已彻底关闭单点监督，样本必须提供 y_event_bank。')
 
             with torch.amp.autocast('cuda', enabled=self.use_amp):
                 out = self.model.forward(batch, mode='event', detach_pre_event=detach_pre_event)
                 num_nodes = batch['x_static'].shape[0]
-                y_target_speed = ensure_node_vector_layout(batch['y_target_speed'], num_nodes)
+
+                y_event_bank = ensure_bank_layout(batch['y_event_bank'], num_nodes)
+
                 event_mask = batch.get('event_mask')
                 if event_mask is not None:
-                    event_mask = ensure_node_vector_layout(event_mask, num_nodes)
-                loss_dict = self.criterion.event_loss(out['pred_speed_t'], y_target_speed, out['delta_event_t'], event_mask)
+                    event_mask = ensure_bank_layout(event_mask, num_nodes)
+                else:
+                    event_mask = out['event_bank_mask']
+
+                loss_dict = self.criterion.event_loss(
+                    out['pred_speed_bank'],
+                    y_event_bank,
+                    out['delta_event_bank'],
+                    event_mask,
+                )
                 loss = loss_dict['loss']
 
             if training:
@@ -390,15 +439,23 @@ class TrafficGNNTrainer:
                     'avg_loss': f'{total_loss / num_batches:.4f}',
                 })
 
-        totals, num_batches = self._reduce_scalar_dict({'loss': total_loss, 'mae': total_mae, 'reg': total_reg}, num_batches)
+        totals, num_batches = self._reduce_scalar_dict(
+            {'loss': total_loss, 'mae': total_mae, 'reg': total_reg},
+            num_batches,
+        )
         denom = max(num_batches, 1)
-        return {'loss': totals['loss'] / denom, 'mae': totals['mae'] / denom, 'reg': totals['reg'] / denom}
+        return {
+            'loss': totals['loss'] / denom,
+            'mae': totals['mae'] / denom,
+            'reg': totals['reg'] / denom,
+        }
 
     def _run_joint_epoch(
         self,
         dataloader: DataLoader,
         optimizer: Optional[torch.optim.Optimizer] = None,
         joint_cfg: Optional[JointTrainConfig] = None,
+        max_steps_per_epoch: int | None = None,
     ) -> dict[str, float]:
         if joint_cfg is None:
             raise ValueError('joint_cfg 不能为空')
@@ -413,55 +470,99 @@ class TrafficGNNTrainer:
         num_batches = 0
 
         pbar = self._pbar(dataloader, 'Train-Joint' if training else 'Val-Joint')
-        for raw_batch in pbar:
-            batch = prepare_batch(raw_batch, self.device)
+        for step, raw_batch in enumerate(pbar):
+            if max_steps_per_epoch is not None and step >= max_steps_per_epoch:
+                break
+
+            batch = self._prepare_stage_batch(
+                raw_batch,
+                [
+                    'x_static', 'profile_feat', 'edge_index',
+                    'y_base_bank', 'base_mask',
+                    'recent_speed_seq',
+                    'y_future_bank', 'future_mask',
+                    'event_weekday', 'event_slot',
+                    'event_vector',
+                    'y_event_bank',
+                    'event_mask',
+                ]
+            )
+
+            if 'y_event_bank' not in batch:
+                raise KeyError('Joint 阶段样本必须提供 y_event_bank。')
+
             num_nodes = batch['x_static'].shape[0]
 
-            with torch.amp.autocast('cuda', enabled=self.use_amp):
-                base_out = self.model.forward(batch, mode='base')
-                y_base_bank = ensure_bank_layout(batch['y_base_bank'], num_nodes)
-                base_mask = batch.get('base_mask')
-                if base_mask is not None:
-                    base_mask = ensure_bank_layout(base_mask, num_nodes)
-                base_loss_dict = self.criterion.base_loss(base_out['pred_speed_bank'], y_base_bank, base_mask)
+            y_base_bank = ensure_bank_layout(batch['y_base_bank'], num_nodes)
+            y_future_bank = ensure_bank_layout(batch['y_future_bank'], num_nodes)
+            y_event_bank = ensure_bank_layout(batch['y_event_bank'], num_nodes)
 
-                recent_out = self.model.forward(batch, mode='recent', detach_base=False)
-                y_future_bank = ensure_bank_layout(batch['y_future_bank'], num_nodes)
-                future_mask = batch.get('future_mask')
-                if future_mask is not None:
-                    future_mask = ensure_bank_layout(future_mask, num_nodes)
-                recent_loss_dict = self.criterion.recent_loss(
-                    recent_out['pred_speed_bank'], y_future_bank, recent_out['delta_recent_bank'], future_mask
+            base_mask = batch.get('base_mask')
+            if base_mask is not None:
+                base_mask = ensure_bank_layout(base_mask, num_nodes)
+
+            future_mask = batch.get('future_mask')
+            if future_mask is not None:
+                future_mask = ensure_bank_layout(future_mask, num_nodes)
+
+            if training:
+                optimizer.zero_grad(set_to_none=True)
+
+            with torch.amp.autocast('cuda', enabled=self.use_amp):
+                # 关键：一次共享 forward，整条链路 base -> recent -> event
+                out = self.model.forward(batch, mode='joint_shared')
+
+                # 1) base loss
+                base_loss_dict = self.criterion.base_loss(
+                    out['base_pred_speed_bank'],
+                    y_base_bank,
+                    base_mask,
                 )
 
-                event_out = self.model.forward(batch, mode='event', detach_pre_event=False)
-                y_target_speed = ensure_node_vector_layout(batch['y_target_speed'], num_nodes)
+                # 2) recent loss
+                recent_loss_dict = self.criterion.recent_loss(
+                    out['recent_pred_speed_bank'],
+                    y_future_bank,
+                    out['delta_recent_bank'],
+                    future_mask,
+                )
+
+                # 3) event loss
                 event_mask = batch.get('event_mask')
                 if event_mask is not None:
-                    event_mask = ensure_node_vector_layout(event_mask, num_nodes)
+                    event_mask = ensure_bank_layout(event_mask, num_nodes)
+                else:
+                    event_mask = out['event_bank_mask']
+
                 event_loss_dict = self.criterion.event_loss(
-                    event_out['pred_speed_t'], y_target_speed, event_out['delta_event_t'], event_mask
+                    out['event_pred_speed_bank'],
+                    y_event_bank,
+                    out['delta_event_bank'],
+                    event_mask,
                 )
 
-                loss = (
+                # 总 loss：一次加权，一次 backward
+                total_joint_loss = (
                     joint_cfg.alpha_base * base_loss_dict['loss']
                     + joint_cfg.beta_recent * recent_loss_dict['loss']
                     + joint_cfg.gamma_event * event_loss_dict['loss']
                 )
 
             if training:
-                optimizer.zero_grad(set_to_none=True)
-                self.scaler.scale(loss).backward()
+                self.scaler.scale(total_joint_loss).backward()
+
                 if joint_cfg.grad_clip is not None:
                     self.scaler.unscale_(optimizer)
                     torch.nn.utils.clip_grad_norm_(self.model.parameters(), joint_cfg.grad_clip)
+
                 self.scaler.step(optimizer)
                 self.scaler.update()
 
-            loss_value = float(loss.detach().item())
             base_value = float(base_loss_dict['loss'].detach().item())
             recent_value = float(recent_loss_dict['loss'].detach().item())
             event_value = float(event_loss_dict['loss'].detach().item())
+            loss_value = float(total_joint_loss.detach().item())
+
             total_loss += loss_value
             total_base += base_value
             total_recent += recent_value
@@ -477,8 +578,28 @@ class TrafficGNNTrainer:
                     'avg_loss': f'{total_loss / num_batches:.4f}',
                 })
 
+            del out
+            del base_loss_dict, recent_loss_dict, event_loss_dict
+            del y_base_bank, y_future_bank, y_event_bank
+
+            if base_mask is not None:
+                del base_mask
+            if future_mask is not None:
+                del future_mask
+            if event_mask is not None:
+                del event_mask
+
+            gc.collect()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+
         totals, num_batches = self._reduce_scalar_dict(
-            {'loss': total_loss, 'base_loss': total_base, 'recent_loss': total_recent, 'event_loss': total_event},
+            {
+                'loss': total_loss,
+                'base_loss': total_base,
+                'recent_loss': total_recent,
+                'event_loss': total_event,
+            },
             num_batches,
         )
         denom = max(num_batches, 1)
@@ -566,7 +687,13 @@ class TrafficGNNTrainer:
         history.append(epoch_log)
         self._append_history_csv(history_csv_path, epoch_log)
         if self.is_main_process:
-            self.logger.info('%s', epoch_log)
+            display_log = {}
+            for k, v in epoch_log.items():
+                if isinstance(v, float):
+                    display_log[k] = round(v, 4)
+                else:
+                    display_log[k] = v
+            self.logger.info('%s', display_log)
 
         metric_value = self._metric_from_log(epoch_log, monitor)
         if self._is_better(metric_value, best_metric, monitor_mode):
@@ -612,11 +739,19 @@ class TrafficGNNTrainer:
         for epoch in range(1, cfg.epochs + 1):
             self._maybe_set_epoch(train_loader, epoch)
             self._maybe_set_epoch(val_loader, epoch)
-            train_metrics = self._run_base_epoch(train_loader, optimizer)
+            train_metrics = self._run_base_epoch(
+                train_loader,
+                optimizer,
+                max_steps_per_epoch=cfg.max_steps_per_epoch,
+            )
             log = {'epoch': epoch, 'stage': 1, **{f'train_{k}': v for k, v in train_metrics.items()}}
             if val_loader is not None:
                 with torch.no_grad():
-                    val_metrics = self._run_base_epoch(val_loader, optimizer=None)
+                    val_metrics = self._run_base_epoch(
+                        val_loader,
+                         optimizer=None,
+                         max_steps_per_epoch=cfg.max_steps_per_epoch,
+                         )
                 log.update({f'val_{k}': v for k, v in val_metrics.items()})
             best_metric = self._finalize_epoch(
                 'stage1', log, history, history_csv_path, checkpoint_dir, monitor, monitor_mode, save_every_epoch, best_metric
@@ -651,11 +786,23 @@ class TrafficGNNTrainer:
         for epoch in range(1, cfg.epochs + 1):
             self._maybe_set_epoch(train_loader, epoch)
             self._maybe_set_epoch(val_loader, epoch)
-            train_metrics = self._run_recent_epoch(train_loader, optimizer=optimizer, detach_base=True, grad_clip=cfg.grad_clip)
+            train_metrics = self._run_recent_epoch(
+                train_loader, 
+                optimizer=optimizer, 
+                detach_base=True, 
+                grad_clip=cfg.grad_clip,
+                max_steps_per_epoch=cfg.max_steps_per_epoch,
+            )
             log = {'epoch': epoch, 'stage': 2, **{f'train_{k}': v for k, v in train_metrics.items()}}
             if val_loader is not None:
                 with torch.no_grad():
-                    val_metrics = self._run_recent_epoch(val_loader, optimizer=None, detach_base=True, grad_clip=None)
+                    val_metrics = self._run_recent_epoch(
+                        val_loader, 
+                        optimizer=None, 
+                        detach_base=True, 
+                        grad_clip=None,
+                        max_steps_per_epoch=cfg.max_steps_per_epoch,
+                        )
                 log.update({f'val_{k}': v for k, v in val_metrics.items()})
             best_metric = self._finalize_epoch(
                 'stage2', log, history, history_csv_path, checkpoint_dir, monitor, monitor_mode, save_every_epoch, best_metric
@@ -690,11 +837,22 @@ class TrafficGNNTrainer:
         for epoch in range(1, cfg.epochs + 1):
             self._maybe_set_epoch(train_loader, epoch)
             self._maybe_set_epoch(val_loader, epoch)
-            train_metrics = self._run_event_epoch(train_loader, optimizer=optimizer, detach_pre_event=True, grad_clip=cfg.grad_clip)
+            train_metrics = self._run_event_epoch(
+                train_loader, 
+                optimizer=optimizer, 
+                detach_pre_event=True, 
+                grad_clip=cfg.grad_clip,
+                max_steps_per_epoch=cfg.max_steps_per_epoch,
+            )
             log = {'epoch': epoch, 'stage': 3, **{f'train_{k}': v for k, v in train_metrics.items()}}
             if val_loader is not None:
                 with torch.no_grad():
-                    val_metrics = self._run_event_epoch(val_loader, optimizer=None, detach_pre_event=True, grad_clip=None)
+                    val_metrics = self._run_event_epoch(
+                        val_loader, 
+                        optimizer=None,
+                        detach_pre_event=True, 
+                        grad_clip=None,
+                        max_steps_per_epoch=cfg.max_steps_per_epoch,)
                 log.update({f'val_{k}': v for k, v in val_metrics.items()})
             best_metric = self._finalize_epoch(
                 'stage3', log, history, history_csv_path, checkpoint_dir, monitor, monitor_mode, save_every_epoch, best_metric
@@ -723,33 +881,49 @@ class TrafficGNNTrainer:
         unfreeze_module(self.core_model.recent)
         unfreeze_module(self.core_model.event)
 
-        optimizer = torch.optim.Adam(
-            [
-                {'params': self.core_model.base.parameters(), 'lr': cfg.lr_base},
-                {'params': self.core_model.recent.parameters(), 'lr': cfg.lr_recent},
-                {'params': self.core_model.event.parameters(), 'lr': cfg.lr_event},
-            ],
-            weight_decay=cfg.weight_decay,
-        )
-
-        history: list[dict[str, float]] = []
-        best_metric: float | None = None
-        checkpoint_dir = Path(checkpoint_dir)
-        history_csv_path = Path(history_dir) / 'joint_history.csv'
-
-        for epoch in range(1, cfg.epochs + 1):
-            self._maybe_set_epoch(train_loader, epoch)
-            self._maybe_set_epoch(val_loader, epoch)
-            train_metrics = self._run_joint_epoch(train_loader, optimizer=optimizer, joint_cfg=cfg)
-            log = {'epoch': epoch, 'stage': 'joint', **{f'train_{k}': v for k, v in train_metrics.items()}}
-            if val_loader is not None:
-                with torch.no_grad():
-                    val_metrics = self._run_joint_epoch(val_loader, optimizer=None, joint_cfg=cfg)
-                log.update({f'val_{k}': v for k, v in val_metrics.items()})
-            best_metric = self._finalize_epoch(
-                'joint', log, history, history_csv_path, checkpoint_dir, monitor, monitor_mode, save_every_epoch, best_metric
+        try:
+            optimizer = torch.optim.Adam(
+                [
+                    {'params': self.core_model.base.parameters(), 'lr': cfg.lr_base},
+                    {'params': self.core_model.recent.parameters(), 'lr': cfg.lr_recent},
+                    {'params': self.core_model.event.parameters(), 'lr': cfg.lr_event},
+                ],
+                weight_decay=cfg.weight_decay,
             )
-        return history
+
+            history: list[dict[str, float]] = []
+            best_metric: float | None = None
+            checkpoint_dir = Path(checkpoint_dir)
+            history_csv_path = Path(history_dir) / 'joint_history.csv'
+
+            for epoch in range(1, cfg.epochs + 1):
+                self._maybe_set_epoch(train_loader, epoch)
+                self._maybe_set_epoch(val_loader, epoch)
+                train_metrics = self._run_joint_epoch(
+                    train_loader, 
+                    optimizer=optimizer, 
+                    joint_cfg=cfg,
+                    max_steps_per_epoch=cfg.max_steps_per_epoch,
+                    )
+                log = {'epoch': epoch, 'stage': 'joint', **{f'train_{k}': v for k, v in train_metrics.items()}}
+                if val_loader is not None:
+                    with torch.no_grad():
+                        val_metrics = self._run_joint_epoch(
+                            val_loader, 
+                            optimizer=None, 
+                            joint_cfg=cfg,
+                            max_steps_per_epoch=cfg.max_steps_per_epoch,
+                        )
+                    log.update({f'val_{k}': v for k, v in val_metrics.items()})
+                best_metric = self._finalize_epoch(
+                    'joint', log, history, history_csv_path, checkpoint_dir, monitor, monitor_mode, save_every_epoch, best_metric
+                )
+
+            return history
+
+        finally:
+            self.core_model.base.set_checkpoint_enabled(self.core_model.cfg.enable_base_checkpoint)
+            self.core_model.recent.set_checkpoint_enabled(self.core_model.cfg.enable_recent_checkpoint)
 
 
 def _make_incremental_experiment_dir(output_root: Path, experiment_name: str) -> Path:

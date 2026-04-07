@@ -12,11 +12,21 @@ from configs.gnn_config import DatasetConfig
 class DictSampleDataset(Dataset):
     """
     样本必须是 dict，至少包含训练阶段所需字段。
-    常用字段:
+
+    stage1 常用字段:
       x_static, profile_feat, edge_index,
-      recent_speed_seq, target_weekday, target_slot, event_vector,
-      y_base_bank, y_future_bank, y_target_speed,
-      base_mask, future_mask, event_mask
+      y_base_bank, base_mask
+
+    stage2 常用字段:
+      x_static, profile_feat, edge_index,
+      recent_speed_seq,
+      y_future_bank, future_mask
+
+    stage3 / joint 常用字段:
+      x_static, profile_feat, edge_index,
+      recent_speed_seq,
+      event_weekday, event_slot, event_vector,
+      y_event_bank, event_mask
     """
 
     def __init__(self, samples: list[dict[str, Any]]):

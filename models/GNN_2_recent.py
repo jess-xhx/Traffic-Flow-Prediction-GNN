@@ -3,6 +3,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch_geometric.nn import GATConv
+from torch.utils.checkpoint import checkpoint
 
 
 def build_batched_edge_index(edge_index: torch.Tensor, num_graphs: int, num_nodes: int) -> torch.Tensor:
@@ -98,11 +99,19 @@ class ResidualGraphPropagator(nn.Module):
     输出:
         delta_feat [7, 288, N, D]
     """
-    def __init__(self, hidden_dim: int, time_chunk_size: int = 6):
+    def __init__(
+        self,
+        hidden_dim: int, 
+        time_chunk_size: int = 256,
+        ):
         super().__init__()
         self.gnn1 = GATConv(hidden_dim, hidden_dim, heads=2, concat=False)
         self.gnn2 = GATConv(hidden_dim, hidden_dim, heads=1, concat=False)
         self.time_chunk_size = time_chunk_size
+        self.use_checkpoint = False
+
+    def set_checkpoint_enabled(self, enabled: bool) -> None:
+        self.use_checkpoint = bool(enabled)
 
     def _forward_chunk(self, chunk_feat: torch.Tensor, edge_index: torch.Tensor) -> torch.Tensor:
         # chunk_feat: [Cg, N, D]
@@ -126,7 +135,16 @@ class ResidualGraphPropagator(nn.Module):
         for start in range(0, G, self.time_chunk_size):
             end = min(start + self.time_chunk_size, G)
             chunk = flat[start:end]
-            out_chunk = self._forward_chunk(chunk, edge_index)
+
+            if self.use_checkpoint and self.training and torch.is_grad_enabled():
+                out_chunk = checkpoint(
+                    lambda z: self._forward_chunk(z, edge_index),
+                    chunk,
+                    use_reentrant=False,
+                )
+            else:
+                out_chunk = self._forward_chunk(chunk, edge_index)
+
             outputs.append(out_chunk)
 
         x = torch.cat(outputs, dim=0)
@@ -153,11 +171,15 @@ class RecentResidualBank(nn.Module):
         bank_hidden_dim: int = 64,
         recent_hidden_dim: int = 32,
         calendar_hidden_dim: int = 32,
-        use_speed_head: bool = True
+        use_speed_head: bool = True,
+        time_chunk_size: int = 256,
     ):
         super().__init__()
 
+        self.speed_head_chunk_size = time_chunk_size
+        
         self.recent_encoder = RecentSequenceEncoder(recent_hidden_dim)
+        self.use_checkpoint = False
         self.calendar_encoder = CalendarQueryEncoder(
             weekday_emb_dim=8,
             slot_emb_dim=16,
@@ -181,7 +203,7 @@ class RecentResidualBank(nn.Module):
 
         # 图传播平滑
         # self.graph_propagator = ResidualGraphPropagator(bank_hidden_dim)
-        self.graph_propagator = ResidualGraphPropagator(bank_hidden_dim, time_chunk_size=6)
+        self.graph_propagator = ResidualGraphPropagator(bank_hidden_dim, time_chunk_size=time_chunk_size)
 
         self.use_speed_head = use_speed_head
         if use_speed_head:
@@ -190,6 +212,24 @@ class RecentResidualBank(nn.Module):
                 nn.ReLU(),
                 nn.Linear(32, 1)
             )
+
+    def _predict_speed_bank_chunked(self, H_bank: torch.Tensor) -> torch.Tensor:
+        W, S, N, D = H_bank.shape
+        flat = H_bank.view(W * S, N, D)
+
+        chunk_size = max(1, int(self.speed_head_chunk_size))
+        pred_chunks = []
+
+        for start in range(0, W * S, chunk_size):
+            end = min(start + chunk_size, W * S)
+            pred_chunk = self.speed_head(flat[start:end]).squeeze(-1)
+            pred_chunks.append(pred_chunk)
+
+        pred_flat = torch.cat(pred_chunks, dim=0)
+        return pred_flat.view(W, S, N)
+
+    def set_checkpoint_enabled(self, enabled: bool) -> None:
+        self.graph_propagator.set_checkpoint_enabled(enabled)
 
     def _build_calendar_ids(self, device: torch.device):
         weekday_ids = torch.arange(7, device=device).unsqueeze(1).repeat(1, 288)  # [7, 288]
@@ -201,7 +241,6 @@ class RecentResidualBank(nn.Module):
         H_base_bank: torch.Tensor,       # [7, 288, N, D]
         recent_speed_seq: torch.Tensor,  # [N, K, 1]
         edge_index: torch.Tensor,        # [2, E]
-        return_full: bool = True,
     ):
         device = H_base_bank.device
         W, S, N, D = H_base_bank.shape
@@ -235,6 +274,6 @@ class RecentResidualBank(nn.Module):
             return delta_recent_bank, H_adapted_bank
 
         # 7) 训练时的速度监督头
-        pred_speed_bank = self.speed_head(H_adapted_bank).squeeze(-1)                     # [7, 288, N]
+        pred_speed_bank = self._predict_speed_bank_chunked(H_adapted_bank)                     # [7, 288, N]
 
         return delta_recent_bank, H_adapted_bank, pred_speed_bank

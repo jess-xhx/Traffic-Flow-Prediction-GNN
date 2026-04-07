@@ -5,7 +5,7 @@ import matplotlib.pyplot as plt
 # =========================
 # 1. 路径设置
 # =========================
-exp_name = "traffic_gnn_exp10"
+exp_name = "traffic_gnn_exp60"
 history_dir = f"/HUBU-AI095/xhx/log/{exp_name}/history"
 
 stage_files = {

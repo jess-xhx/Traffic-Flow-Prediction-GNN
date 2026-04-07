@@ -15,11 +15,29 @@ class ModelConfig:
     static_dim: int
     profile_dim: int
     event_dim: int
+
     static_hidden_dim: int = 32
     calendar_hidden_dim: int = 32
     profile_hidden_dim: int = 32
     bank_hidden_dim: int = 64
     recent_hidden_dim: int = 32
+
+    # ---- 模块1：BaseWeeklyBank ----
+    base_time_chunk_size: int = 256
+    temporal_kernel_size: int = 3
+    temporal_dropout: float = 0.0
+    temporal_dilations: tuple[int, ...] = (1, 2, 4)
+    temporal_node_chunk_size: int = 128
+
+    # ---- 模块2：RecentResidualBank ----
+    recent_time_chunk_size: int = 256
+
+    # ---- 模块3：EventResidualInjector ----
+    event_future_chunk_size: int = 128
+
+    # ---- 显存优化 ----
+    enable_base_checkpoint: bool = False
+    enable_recent_checkpoint: bool = False
 
 
 @dataclass
@@ -29,6 +47,7 @@ class StageTrainConfig:
     weight_decay: float = 1e-5
     grad_clip: float | None = 5.0
     log_every: int = 1
+    max_steps_per_epoch: int | None = None
 
 
 @dataclass
@@ -45,7 +64,7 @@ class JointTrainConfig:
     lambda_event_reg: float = 1e-4
     grad_clip: float | None = 5.0
     log_every: int = 1
-
+    max_steps_per_epoch: int | None = None
 
 @dataclass
 class DatasetConfig:
