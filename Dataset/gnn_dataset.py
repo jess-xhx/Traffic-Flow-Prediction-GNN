@@ -11,10 +11,7 @@ from typing import Any, Optional
 import torch
 from torch.utils.data import DataLoader, Dataset, Sampler
 
-try:
-    from utils.gnn_data import build_dataloader, load_split_datasets
-except ImportError:
-    from gnn_data import build_dataloader, load_split_datasets
+from utils.gnn_data import build_dataloader, load_split_datasets
 
 
 def _safe_torch_load(path: str | Path) -> Any:
@@ -102,6 +99,7 @@ def detect_sharded_dataset_root(data_cfg: Any, base_dir: Path) -> Optional[Path]
             candidates.append(resolved.parent)
 
     candidates.extend([
+        (base_dir / 'mock_traffic_output_week_event').resolve(),
         (base_dir / 'mock_traffic_output').resolve(),
         base_dir.resolve(),
     ])

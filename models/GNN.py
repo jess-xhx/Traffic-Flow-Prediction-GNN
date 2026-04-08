@@ -6,14 +6,9 @@ import torch.nn as nn
 from configs.gnn_config import ModelConfig
 from utils.gnn_utils import Batch, Tensor, prepare_batch, scalar_int
 
-try:
-    from GNN_1_base import BaseWeeklyBank
-    from GNN_2_recent import RecentResidualBank
-    from GNN_3_event import EventResidualInjector
-except ImportError:  # 兼容 package 导入
-    from .GNN_1_base import BaseWeeklyBank
-    from .GNN_2_recent import RecentResidualBank
-    from .GNN_3_event import EventResidualInjector
+from .GNN_1_base import BaseWeeklyBank
+from .GNN_2_recent import RecentResidualBank
+from .GNN_3_event import EventResidualInjector
 
 
 class TrafficGNNSystem(nn.Module):

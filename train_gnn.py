@@ -17,59 +17,29 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import DataLoader
 from tqdm.auto import tqdm
 
-PROJECT_ROOT = Path(__file__).resolve().parent
-for candidate in [PROJECT_ROOT, PROJECT_ROOT / 'models', PROJECT_ROOT / '3.models']:
-    if candidate.exists() and str(candidate) not in sys.path:
-        sys.path.insert(0, str(candidate))
+from configs.gnn_config import (
+    ExperimentConfig,
+    JointTrainConfig,
+    ModelConfig,
+    ResolvedPaths,
+    StageTrainConfig,
+    dataclass_to_dict,
+    dump_experiment_config,
+    load_experiment_config,
+)
+from utils.gnn_loss import TrafficGNNLoss
+from utils.gnn_utils import (
+    ensure_bank_layout,
+    ensure_dir,
+    freeze_module,
+    prepare_batch,
+    save_json,
+    set_seed,
+    unfreeze_module,
+)
 
-try:
-    from configs.gnn_config import (
-        ExperimentConfig,
-        JointTrainConfig,
-        ModelConfig,
-        ResolvedPaths,
-        StageTrainConfig,
-        dataclass_to_dict,
-        dump_experiment_config,
-        load_experiment_config,
-    )
-except ImportError:
-    from gnn_config import (
-        ExperimentConfig,
-        JointTrainConfig,
-        ModelConfig,
-        ResolvedPaths,
-        StageTrainConfig,
-        dataclass_to_dict,
-        dump_experiment_config,
-        load_experiment_config,
-    )
-
-try:
-    from utils.gnn_loss import TrafficGNNLoss
-    from utils.gnn_utils import (
-        ensure_bank_layout,
-        ensure_dir,
-        freeze_module,
-        prepare_batch,
-        save_json,
-        set_seed,
-        unfreeze_module,
-    )
-except ImportError:
-    from gnn_loss import TrafficGNNLoss
-    from gnn_utils import (
-        ensure_bank_layout,
-        ensure_dir,
-        freeze_module,
-        prepare_batch,
-        save_json,
-        set_seed,
-        unfreeze_module,
-    )
-
-from DataSet import load_datasets_and_dataloaders
-from GNN import TrafficGNNSystem
+from Dataset.gnn_dataset import load_datasets_and_dataloaders
+from models.GNN import TrafficGNNSystem
 
 
 def is_dist_initialized() -> bool:

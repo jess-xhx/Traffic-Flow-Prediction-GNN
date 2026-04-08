@@ -1,18 +1,31 @@
-import os
-import pandas as pd
+from __future__ import annotations
+
+import argparse
+from pathlib import Path
+
 import matplotlib.pyplot as plt
+import pandas as pd
 
 # =========================
 # 1. 路径设置
 # =========================
-exp_name = "traffic_gnn_exp60"
-history_dir = f"/HUBU-AI095/xhx/log/{exp_name}/history"
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description="Plot joint-stage training curves")
+    parser.add_argument("--exp-name", required=True, type=str, help="experiment directory name under log/")
+    parser.add_argument("--project-root", default="/HUBU-AI095/xhx", type=str, help="project root on Linux server")
+    return parser
 
-joint_file = os.path.join(history_dir, "joint_history.csv")
+
+args = build_parser().parse_args()
+history_dir = Path(args.project_root) / "log" / args.exp_name / "history"
+joint_file = history_dir / "joint_history.csv"
 
 # =========================
 # 2. 读取数据
 # =========================
+if not joint_file.exists():
+    raise FileNotFoundError(f"joint history not found: {joint_file}")
+
 df = pd.read_csv(joint_file)
 
 # =========================
@@ -92,7 +105,7 @@ plt.tight_layout(rect=[0, 0, 1, 0.96])
 # =========================
 # 4. 保存 PNG
 # =========================
-save_path = os.path.join(history_dir, f"{exp_name}_joint_loss_show.png")
+save_path = history_dir / f"{args.exp_name}_joint_loss_show.png"
 plt.savefig(save_path, bbox_inches="tight")
 plt.show()
 

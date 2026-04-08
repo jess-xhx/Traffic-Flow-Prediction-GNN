@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import functools
+from collections import OrderedDict
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -9,24 +10,14 @@ from typing import Any, Sequence
 import torch
 from torch.utils.data import Dataset
 
-try:
-    from utils.gps_trip_parser import (
-        ParsedTripRecord,
-        build_trip_encoder_batch,
-        detect_stop_segments,
-        parse_real_trip_record,
-    )
-    from utils.map_matching import MatchResult, RoadEdgeIndex
-    from utils.route_planner import EdgeRoutePlanner
-except ImportError:
-    from gps_trip_parser import (
-        ParsedTripRecord,
-        build_trip_encoder_batch,
-        detect_stop_segments,
-        parse_real_trip_record,
-    )
-    from map_matching import MatchResult, RoadEdgeIndex
-    from route_planner import EdgeRoutePlanner
+from utils.gps_trip_parser import (
+    ParsedTripRecord,
+    build_trip_encoder_batch,
+    detect_stop_segments,
+    parse_real_trip_record,
+)
+from utils.map_matching import MatchResult, RoadEdgeIndex
+from utils.route_planner import EdgeRoutePlanner
 
 
 @dataclass
@@ -141,6 +132,8 @@ def build_single_trip_sample(
             "current_time": current_time.strftime("%Y-%m-%d %H:%M:%S"),
             "sample_found_path": bool(route.found_path),
             "destination_coord": destination_coord,
+            "current_match_distance_m": float(current_match.distance_m),
+            "dest_match_distance_m": float(dest_match.distance_m),
         },
     }
 
@@ -155,18 +148,27 @@ class FinalETADataset(Dataset):
         min_remaining_min: float = 10.0,
         topk_match: int = 5,
         max_route_len: int = 256,
+        require_found_path: bool = True,
+        max_match_distance_m: float | None = 80.0,
+        preload_and_filter: bool = True,
+        max_cache_items: int = 20000,
     ):
         self.trip_paths = [str(Path(p)) for p in trip_paths]
         self.road_index = RoadEdgeIndex.from_bundle(road_bundle_path)
         self.route_planner = EdgeRoutePlanner.from_road_index(self.road_index)
         self.topk_match = int(topk_match)
         self.max_route_len = int(max_route_len)
+        self.require_found_path = bool(require_found_path)
+        self.max_match_distance_m = None if max_match_distance_m is None else float(max_match_distance_m)
+        self.preload_and_filter = bool(preload_and_filter)
+        self.max_cache_items = max(0, int(max_cache_items))
         self.sample_specs: list[ETASampleSpec] = []
-        self._cache: dict[str, dict[str, Any]] = {}
+        self._cache: OrderedDict[str, dict[str, Any]] = OrderedDict()
 
+        all_specs: list[ETASampleSpec] = []
         for trip_path in self.trip_paths:
             record = _cached_parse_trip(trip_path)
-            self.sample_specs.extend(
+            all_specs.extend(
                 build_sample_specs_for_trip(
                     record=record,
                     trip_path=trip_path,
@@ -176,14 +178,34 @@ class FinalETADataset(Dataset):
                 )
             )
 
-    def __len__(self) -> int:
-        return len(self.sample_specs)
+        self.raw_num_specs = len(all_specs)
+        self.kept_num_specs = 0
+        self.dropped_num_specs = 0
+        self.dropped_no_path_num_specs = 0
+        self.dropped_match_distance_num_specs = 0
+        self.dropped_error_num_specs = 0
 
-    def __getitem__(self, index: int) -> dict[str, Any]:
-        spec = self.sample_specs[index]
-        if spec.sample_id in self._cache:
-            return self._cache[spec.sample_id]
-        sample = build_single_trip_sample(
+        if self.preload_and_filter:
+            for spec in all_specs:
+                try:
+                    sample = self._build_sample(spec)
+                except Exception:
+                    self.dropped_error_num_specs += 1
+                    continue
+                keep, reason = self._should_keep_sample(sample)
+                if not keep:
+                    self._mark_drop(reason)
+                    continue
+                self.sample_specs.append(spec)
+                self._cache_put(spec.sample_id, sample)
+        else:
+            self.sample_specs = all_specs
+
+        self.kept_num_specs = len(self.sample_specs)
+        self.dropped_num_specs = self.raw_num_specs - self.kept_num_specs
+
+    def _build_sample(self, spec: ETASampleSpec) -> dict[str, Any]:
+        return build_single_trip_sample(
             trip_path=spec.trip_path,
             current_time=spec.sample_time,
             road_index=self.road_index,
@@ -191,7 +213,66 @@ class FinalETADataset(Dataset):
             topk_match=self.topk_match,
             max_route_len=self.max_route_len,
         )
-        self._cache[spec.sample_id] = sample
+
+    def _should_keep_sample(self, sample: dict[str, Any]) -> tuple[bool, str | None]:
+        meta = sample["meta"]
+        if self.require_found_path and not bool(meta.get("sample_found_path", False)):
+            return False, "no_path"
+        if self.max_match_distance_m is not None:
+            current_match_distance_m = float(meta.get("current_match_distance_m", 0.0))
+            dest_match_distance_m = float(meta.get("dest_match_distance_m", 0.0))
+            if current_match_distance_m > self.max_match_distance_m or dest_match_distance_m > self.max_match_distance_m:
+                return False, "match_distance"
+        return True, None
+
+    def _mark_drop(self, reason: str | None) -> None:
+        if reason == "no_path":
+            self.dropped_no_path_num_specs += 1
+        elif reason == "match_distance":
+            self.dropped_match_distance_num_specs += 1
+
+    def _cache_get(self, sample_id: str) -> dict[str, Any] | None:
+        if self.max_cache_items <= 0:
+            return None
+        sample = self._cache.get(sample_id)
+        if sample is not None:
+            self._cache.move_to_end(sample_id)
+        return sample
+
+    def _cache_put(self, sample_id: str, sample: dict[str, Any]) -> None:
+        if self.max_cache_items <= 0:
+            return
+        self._cache[sample_id] = sample
+        self._cache.move_to_end(sample_id)
+        while len(self._cache) > self.max_cache_items:
+            self._cache.popitem(last=False)
+
+    def get_stats(self) -> dict[str, Any]:
+        return {
+            "trip_files": len(self.trip_paths),
+            "raw_num_specs": self.raw_num_specs,
+            "kept_num_specs": self.kept_num_specs,
+            "dropped_num_specs": self.dropped_num_specs,
+            "dropped_no_path_num_specs": self.dropped_no_path_num_specs,
+            "dropped_match_distance_num_specs": self.dropped_match_distance_num_specs,
+            "dropped_error_num_specs": self.dropped_error_num_specs,
+            "require_found_path": self.require_found_path,
+            "max_match_distance_m": self.max_match_distance_m,
+            "preload_and_filter": self.preload_and_filter,
+            "max_cache_items": self.max_cache_items,
+            "cache_items_after_init": len(self._cache),
+        }
+
+    def __len__(self) -> int:
+        return len(self.sample_specs)
+
+    def __getitem__(self, index: int) -> dict[str, Any]:
+        spec = self.sample_specs[index]
+        cached = self._cache_get(spec.sample_id)
+        if cached is not None:
+            return cached
+        sample = self._build_sample(spec)
+        self._cache_put(spec.sample_id, sample)
         return sample
 
 

@@ -6,22 +6,13 @@ from pathlib import Path
 
 import torch
 
-try:
-    from configs.eta_config import ETAEncoderConfig, ETAHeadConfig, RouteTokenConfig, SameCityETAConfig, TripTokenConfig
-    from configs.gnn_config import load_experiment_config
-    from models.GNN import TrafficGNNSystem
-    from models.eta_model_final import FinalHybridETAModel
-    from eta_dataset_final import build_single_trip_sample
-    from utils.map_matching import RoadEdgeIndex
-    from utils.route_planner import EdgeRoutePlanner
-except ImportError:
-    from eta_config import ETAEncoderConfig, ETAHeadConfig, RouteTokenConfig, SameCityETAConfig, TripTokenConfig
-    from gnn_config import load_experiment_config
-    from GNN import TrafficGNNSystem
-    from eta_model_final import FinalHybridETAModel
-    from eta_dataset_final import build_single_trip_sample
-    from map_matching import RoadEdgeIndex
-    from route_planner import EdgeRoutePlanner
+from configs.eta_config import ETAEncoderConfig, ETAHeadConfig, RouteTokenConfig, SameCityETAConfig, TripTokenConfig
+from configs.gnn_config import load_experiment_config
+from models.GNN import TrafficGNNSystem
+from models.eta_model import FinalHybridETAModel
+from Dataset.eta_dataset import build_single_trip_sample
+from utils.map_matching import RoadEdgeIndex
+from utils.route_planner import EdgeRoutePlanner
 
 
 def load_tensor_any(path: str | Path, candidate_keys: list[str]) -> torch.Tensor:

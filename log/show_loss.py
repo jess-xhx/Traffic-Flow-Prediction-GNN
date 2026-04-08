@@ -1,17 +1,28 @@
-import os
-import pandas as pd
+from __future__ import annotations
+
+import argparse
+from pathlib import Path
+
 import matplotlib.pyplot as plt
+import pandas as pd
 
 # =========================
 # 1. 路径设置
 # =========================
-exp_name = "traffic_gnn_exp60"
-history_dir = f"/HUBU-AI095/xhx/log/{exp_name}/history"
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description="Plot stage1/2/3 training curves")
+    parser.add_argument("--exp-name", required=True, type=str, help="experiment directory name under log/")
+    parser.add_argument("--project-root", default="/HUBU-AI095/xhx", type=str, help="project root on Linux server")
+    return parser
+
+
+args = build_parser().parse_args()
+history_dir = Path(args.project_root) / "log" / args.exp_name / "history"
 
 stage_files = {
-    "Stage 1": os.path.join(history_dir, "stage1_history.csv"),
-    "Stage 2": os.path.join(history_dir, "stage2_history.csv"),
-    "Stage 3": os.path.join(history_dir, "stage3_history.csv"),
+    "Stage 1": history_dir / "stage1_history.csv",
+    "Stage 2": history_dir / "stage2_history.csv",
+    "Stage 3": history_dir / "stage3_history.csv",
 }
 
 # =========================
@@ -19,8 +30,11 @@ stage_files = {
 # =========================
 history = {}
 for stage_name, file_path in stage_files.items():
-    df = pd.read_csv(file_path)
-    history[stage_name] = df
+    if file_path.exists():
+        history[stage_name] = pd.read_csv(file_path)
+
+if not history:
+    raise FileNotFoundError(f"no stage history csv found in {history_dir}")
 
 # =========================
 # 3. 绘图参数
@@ -74,7 +88,7 @@ plt.tight_layout(rect=[0, 0, 1, 0.94])
 # =========================
 # 4. 只保存 PNG
 # =========================
-save_path = os.path.join(history_dir, f"{exp_name}_show.png")
+save_path = history_dir / f"{args.exp_name}_show.png"
 plt.savefig(save_path, bbox_inches="tight")
 plt.show()
 

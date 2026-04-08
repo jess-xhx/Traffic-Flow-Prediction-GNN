@@ -6,12 +6,8 @@ from typing import Any
 import torch
 import torch.nn as nn
 
-try:
-    from configs.eta_config import SameCityETAConfig
-    from models.GNN import TrafficGNNSystem
-except ImportError:
-    from eta_config import SameCityETAConfig
-    from GNN import TrafficGNNSystem
+from configs.eta_config import SameCityETAConfig
+from models.GNN import TrafficGNNSystem
 
 
 SLOTS_PER_DAY = 288
@@ -268,6 +264,9 @@ class FinalHybridETAModel(nn.Module):
         self.cfg = cfg
         self.gnn_backbone = gnn_backbone
         self.bank_mode = str(bank_mode).lower()
+        self.static_base_bank_cache_enabled = self.bank_mode == "base" and bool(cfg.freeze_gnn_backbone)
+        self._static_bank_ready = False
+        self._cache_usage_announced = False
         if cfg.freeze_gnn_backbone:
             for p in self.gnn_backbone.parameters():
                 p.requires_grad = False
@@ -276,6 +275,8 @@ class FinalHybridETAModel(nn.Module):
         self.register_buffer("x_static_buf", x_static.float())
         self.register_buffer("profile_feat_buf", profile_feat.float())
         self.register_buffer("edge_index_buf", edge_index.long())
+        self.register_buffer("cached_bank_buf", torch.empty(0), persistent=False)
+        self.register_buffer("cached_pred_speed_bank_buf", torch.empty(0), persistent=False)
         if default_recent_speed_seq is not None:
             self.register_buffer("default_recent_speed_seq_buf", default_recent_speed_seq.float())
         else:
@@ -292,6 +293,16 @@ class FinalHybridETAModel(nn.Module):
         self.sequence_encoder = ETASequenceEncoder(cfg.encoder)
         self.eta_head = ETAHead(cfg.head)
 
+    def warmup_static_bank_cache(self) -> None:
+        if not self.static_base_bank_cache_enabled or self._static_bank_ready:
+            return
+        with torch.no_grad():
+            out = self.gnn_backbone.forward_base(self.x_static_buf, self.profile_feat_buf, self.edge_index_buf)
+        self.cached_bank_buf = out["H_base_bank"].detach()
+        self.cached_pred_speed_bank_buf = out["pred_speed_bank"].detach()
+        self._static_bank_ready = True
+        print("Warmed up static base bank cache.")
+
     def _run_gnn_backbone(self, batch: dict[str, Any]) -> dict[str, torch.Tensor]:
         recent_speed_seq = batch.get("recent_speed_seq", self.default_recent_speed_seq_buf)
         event_vector = batch.get("event_vector", self.default_event_vector_buf)
@@ -301,6 +312,15 @@ class FinalHybridETAModel(nn.Module):
 
         with context:
             if self.bank_mode == "base":
+                if self.static_base_bank_cache_enabled and self._static_bank_ready:
+                    if not self._cache_usage_announced:
+                        print("Using cached base bank.")
+                        self._cache_usage_announced = True
+                    return {
+                        "bank": self.cached_bank_buf,
+                        "pred_speed_bank": self.cached_pred_speed_bank_buf,
+                        "source": "base_cached",
+                    }
                 out = self.gnn_backbone.forward_base(self.x_static_buf, self.profile_feat_buf, self.edge_index_buf)
                 return {"bank": out["H_base_bank"], "pred_speed_bank": out["pred_speed_bank"], "source": "base"}
             if self.bank_mode == "recent":
